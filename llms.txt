@@ -1,0 +1,29 @@
+# Fairwalter Public API
+
+> Read-only REST API for Swiss property management data: portfolio, occupancy, files and the general ledger. Generated daily from the live OpenAPI document.
+
+## Reference
+
+- [README](README.md): authentication, resource model, modes, pagination, errors and the accounting contract.
+- [Account](reference/account.md): account endpoints and fields.
+- [Asset](reference/asset.md): asset endpoints and fields.
+- [Booking](reference/booking.md): booking endpoints and fields.
+- [Building](reference/building.md): building endpoints and fields.
+- [Contract](reference/contract.md): contract endpoints and fields.
+- [Damage](reference/damage.md): damage endpoints and fields.
+- [DebitorInvoice](reference/debitor-invoice.md): debitor-invoice endpoints and fields.
+- [File](reference/file.md): file endpoints and fields.
+- [FiscalYear](reference/fiscal-year.md): fiscal-year endpoints and fields.
+- [Mandate](reference/mandate.md): mandate endpoints and fields.
+- [Object](reference/object.md): object endpoints and fields.
+- [OpeningBalance](reference/opening-balance.md): opening-balance endpoints and fields.
+- [Owner](reference/owner.md): owner endpoints and fields.
+- [Person](reference/person.md): person endpoints and fields.
+- [Property](reference/property.md): property endpoints and fields.
+- [Room](reference/room.md): room endpoints and fields.
+- [Service Provider](reference/service-provider.md): service-provider endpoints and fields.
+- [User](reference/user.md): user endpoints and fields.
+
+## Optional
+
+- [openapi.json](openapi.json): the machine-readable specification.

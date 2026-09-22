@@ -1,0 +1,4358 @@
+# Fairwalter Public API
+
+Reference documentation for the read-only Fairwalter public API, version `1.0.0`.
+
+This repository is generated once a day from the live specification at [`https://my.fairwalter.ch/public-api/docs.json`](https://my.fairwalter.ch/public-api/docs.json). Everything below is produced from it — nothing here is written by hand, and the commit history is the changelog of the API.
+
+- [`openapi.json`](openapi.json) — the OpenAPI 3 document, committed verbatim. Point a client generator at it.
+- [`reference/`](reference/) — one page per resource: endpoints, parameters, field tables and an example response.
+- [`llms.txt`](llms.txt) / [`llms-full.txt`](llms-full.txt) — the same reference in one file, for handing to an assistant.
+- [Interactive API console](https://my.fairwalter.ch/public-api/docs) — execute a request against your own data (sign-in required).
+
+## Resources
+
+- [Account](reference/account.md)
+- [Asset](reference/asset.md)
+- [Booking](reference/booking.md)
+- [Building](reference/building.md)
+- [Contract](reference/contract.md)
+- [Damage](reference/damage.md)
+- [DebitorInvoice](reference/debitor-invoice.md)
+- [File](reference/file.md)
+- [FiscalYear](reference/fiscal-year.md)
+- [Mandate](reference/mandate.md)
+- [Object](reference/object.md)
+- [OpeningBalance](reference/opening-balance.md)
+- [Owner](reference/owner.md)
+- [Person](reference/person.md)
+- [Property](reference/property.md)
+- [Room](reference/room.md)
+- [Service Provider](reference/service-provider.md)
+- [User](reference/user.md)
+
+---
+
+Read-only public API v1.
+
+The OpenAPI 3 document behind this page is served at `/public-api/docs.json` — point your code generator or HTTP client at it directly. It carries an absolute `servers[0].url`, so a generated client works without further configuration.
+
+## Authentication
+
+All `/public-api/v1` endpoints require a personal API token sent as a Bearer token in the `Authorization` header:
+
+```
+Authorization: Bearer fw_<your-token>
+```
+
+Tokens are issued per user and start with the `fw_` prefix. Contact your Fairwalter administrator to obtain a token.
+
+### Using "Try it out"
+
+Click the **Authorize** button at the top of this page, paste your `fw_...` token (Swagger UI adds the `Bearer ` prefix automatically), then use the "Try it out" buttons on individual endpoints.
+
+## Resource model
+
+Every resource is scoped to the customer the token belongs to, and further to the mandates the token may reach.
+
+**Portfolio** — a one-to-many chain, each level carrying the FK of its parent:
+
+```
+Mandate → Property → Building → Object → Room
+                                     ↘ Asset
+```
+
+- **Mandate** — the contract a property manager holds with an owner. Every other resource lives under exactly one mandate.
+- **Property** — a land parcel under a mandate (`mandateId`).
+- **Building** — sits on a property (`propertyId`).
+- **Object** — a rental or ownership unit inside a building (`buildingId`).
+- **Room** — a room inside an object (`objectId`).
+- **Asset** — an appliance or installation, attached at whichever level it belongs to (`roomId`, `objectId`, `buildingId` or `propertyId`).
+
+**Occupancy** — who uses an object, and under what agreement:
+
+- **Contract** (`rent` only) — a tenancy on an object (`objectId`, `propertyId`, `mandateId`).
+- **Owner** (`condo` only) — an ownership relation on an object. The condo counterpart of a contract, with its own vocabulary.
+- **Person** — a natural person or company. Not mode-scoped: the same person can be a tenant here and an owner there. `roles` tells you which. Contracts and owners reference persons; use `filter[personId]` to go the other way.
+
+**Finance** — the general ledger:
+
+```
+FiscalYear ──< OpeningBalance >── Account
+     ╎                              ╎
+     └──────< Booking >─────────────┘
+```
+
+- **FiscalYear** — either property-scoped (`type: accounting`, `propertyId` set) or a mandate-level rollup (`type: consolidation`, `mandateId` set). Exactly one of the two ids is non-null; the other is `null`.
+- **Account** — one entry of the chart of accounts for the `{mode}` chart, with `number`, `label` and `category`.
+- **OpeningBalance** — an account's balance carried into a fiscal year (`fiscalYearId`, `accountId`, `propertyId`).
+- **Booking** — one journal entry (`debitAccountId`, `creditAccountId`, `propertyId`, optional `objectId`).
+- **DebitorInvoice** — an outgoing invoice (`contractId`, `objectId`, `propertyId`, `mandateId`), the document behind most rent bookings.
+
+**Operations and access:**
+
+- **Damage** — a damage report (`objectId`, `buildingId`, `propertyId`, optional `serviceProviderId`).
+- **ServiceProvider** — a trade contractor. Not mode-scoped.
+- **User** — a property-management staff account, referenced by `managerId` on properties. Not mode-scoped.
+- **File** — documents, listed under their owner (`/properties/{id}/files`, `/contracts/{id}/files`, …) and fetched by id via `getFile` / `downloadFile`.
+
+Persons and mandates carry `name1` and `name2` (line 1 and line 2 of the name — company plus department, or last plus first name depending on `contactType`), not a single `name`. The one exception is the mandate sort key `sort=name`, which orders by `name1`.
+
+Use `filter[*Id]` on list endpoints to traverse any of these edges. For example, `GET /public-api/v1/rent/objects?filter[propertyId]=42` returns every object under property 42.
+
+## Modes
+
+Most paths include a `{mode}` segment that selects the business domain:
+
+- `rent` — rental-management data (`/public-api/v1/rent/...`).
+- `condo` — condominium-ownership data (`/public-api/v1/condo/...`).
+
+Mode constrains every related resource: a `rent` mandate only contains `rent` properties, buildings, and objects, and `{mode}/accounts` returns that mode's chart of accounts. `listMandates`, `listPersons`, `listServiceProviders` and `listUsers` carry no `{mode}` because they span both — mandates are the discriminator, so read `type` on a returned mandate to decide which mode to use for follow-up calls.
+
+## Query parameters
+
+- **Filter:** `filter[key]=value`. Allowed keys differ per endpoint and are listed on each operation.
+- **Search:** `q=text` — case-insensitive partial match across the fields named in the `q` description.
+- **Sort:** `sort=key` ascending, `sort=-key` descending.
+
+Filters combine with `AND`; `q` narrows the same result set further.
+
+### Bracket encoding
+
+`filter[...]` contains characters that some clients and shells mangle. Either percent-encode the brackets, or disable globbing:
+
+```bash
+# Percent-encoded (works everywhere)
+curl -H "Authorization: Bearer fw_..." \
+  "https://app.fairwalter.ch/public-api/v1/rent/bookings?filter%5BfiscalYearId%5D=31&limit=500"
+
+# Or -g / --globoff to keep the literal brackets
+curl -g -H "Authorization: Bearer fw_..." \
+  "https://app.fairwalter.ch/public-api/v1/rent/bookings?filter[fiscalYearId]=31&limit=500"
+```
+
+Most HTTP libraries encode query parameters for you; the problem is specific to shells and hand-built URLs.
+
+## Response shapes
+
+**List** endpoints wrap their rows in an envelope:
+
+```json
+{"data": [{"id": 1}, {"id": 2}], "meta": {"pagination": {"limit": 30, "offset": 0, "total": 2, "hasMore": false}}}
+```
+
+**Detail** endpoints return the bare object, with no `data` wrapper:
+
+```json
+{"id": 1}
+```
+
+This difference is deliberate — a single resource has no pagination to report. Detail responses also carry more fields than the list rows of the same resource.
+
+**Amounts** are strings, never JSON numbers: a fixed two decimal places, `.` as the decimal separator, no thousands separator, no currency symbol (`"1700.00"`, `"-4420.00"`). Parse them as a decimal type with invariant culture — a de-CH locale parser reads `.` as a thousands separator and will silently turn `1700.00` into `170000`. Never parse them as floats.
+
+All amounts are in **CHF**. Fairwalter is a single-currency product, so responses carry no `currency` field.
+
+**Dates** are `YYYY-MM-DD` strings. Date-only fields have no time component or timezone.
+
+## Pagination
+
+List endpoints return at most `limit` items (default `30`) starting at `offset` (default `0`), plus a `meta.pagination` block with `limit`, `offset`, `total`, and `hasMore`. The maximum is `100` on most endpoints; export-oriented ones allow more (bookings: `500`). Each endpoint's `limit` parameter carries its own `maximum` in this spec, and a larger value is capped rather than rejected. To walk a full collection:
+
+```text
+offset = 0
+loop:
+  page = GET .../resources?limit=100&offset={offset}
+  process(page.data)
+  offset += page.data.length
+  if not page.meta.pagination.hasMore: break
+```
+
+Prefer `hasMore` over `ceil(total/limit)` for the loop condition — `total` reflects the count at query time and may drift across pages if the underlying data changes. `limit=0` is accepted and silently normalized to 1; pass the endpoint's `maximum` for the largest page.
+
+## Rate limits
+
+Requests are limited to **600 per minute per token**, measured over a sliding window. Every response carries the current state:
+
+| Header                  | Meaning                                             |
+|-------------------------|-----------------------------------------------------|
+| `X-RateLimit-Limit`     | Requests allowed in the window.                     |
+| `X-RateLimit-Remaining` | Requests left in the current window.                |
+| `X-RateLimit-Reset`     | Unix timestamp (seconds) when the window refills.   |
+
+Exceeding the limit returns `429` with error code `http` and a `Retry-After` header holding the number of seconds to wait. Honour it rather than retrying immediately; a bulk export that paginates at the endpoint's maximum page size stays far below the limit.
+
+## Errors
+
+Every error response uses the same JSON envelope:
+
+```json
+{
+  "code": "badQuery",
+  "message": "Unknown filter key: foo",
+  "errors": [{"field": "filter.foo", "message": "Unknown filter key"}]
+}
+```
+
+| Code              | HTTP   | Meaning                                                                |
+|-------------------|--------|------------------------------------------------------------------------|
+| `badQuery`        | 400    | Malformed query — unknown filter/sort key, invalid pagination value.   |
+| `unauthenticated` | 401    | Bearer token missing, malformed, or revoked.                           |
+| `accessDenied`    | 403    | Token is valid but cannot reach the requested mandate or object scope. |
+| `notFound`        | 404    | No resource with the requested id (or it sits outside the token scope).|
+| `http`            | other 4xx | Other client-side error surfaced by the framework, including `429`. |
+| `internal`        | 500    | Unhandled server error.                                                |
+
+## Accounting
+
+This section is the contract for anyone building a booking export or a financial statement.
+
+### Sign convention
+
+Every booking is a double entry: exactly one debit account, exactly one credit account, and a **positive** `amount`. The direction is carried by which account is which — there are no negative booking amounts.
+
+Balances are **debit-positive**, and the same formula applies to every account regardless of category:
+
+```
+signed_movement(account) = Σ amounts where account is debitAccountId
+                         − Σ amounts where account is creditAccountId
+
+closing_balance(account) = opening_balance + signed_movement
+```
+
+That single rule is the whole convention. It follows that, in a normal year:
+
+| Category      | Normal sign | Reads as              |
+|---------------|-------------|-----------------------|
+| `assets`      | ≥ 0         | Aktiven               |
+| `liabilities` | ≤ 0         | Passiven (incl. equity) |
+| `revenue`     | ≤ 0         | Ertrag                |
+| `expenses`    | ≥ 0         | Aufwand               |
+
+Contra accounts flip the sign of their category — a value correction inside `assets` is negative, a revenue reduction is positive. Do not "fix" a sign because it looks wrong for its category; the sign is the data.
+
+`OpeningBalance.amount` is **already signed** with this convention (a credit-side opening balance is negative). Booking `amount` is not — it is always positive.
+
+### Categories and account numbers
+
+`Account.category` has four values. There is deliberately no `equity` category: Fairwalter's internal model has four, and equity accounts file under `liabilities`. The chart follows the Swiss KMU / Liegenschaften layout, so the account `number` gives you the finer structure:
+
+| `category`    | Number range        | Swiss label                                             |
+|---------------|---------------------|---------------------------------------------------------|
+| `assets`      | 1xxx                | Aktiven                                                 |
+| `liabilities` | 2xxx                | Passiven — including 28xx *Kapital der Eigentümer* and 29xx *Reserven und Jahresgewinn/-verlust* (equity) |
+| `revenue`     | 3xxx                | Ertrag                                                  |
+| `expenses`    | 4xxx–8xxx, and 9000 | Aufwand — 4xxx–6xxx operating, 8xxx extraordinary and non-operating, 9000 the closing account |
+
+Two traps in that table:
+
+- **Account 9000 (`Abschluss Erfolgsrechnung`) is categorised `expenses`.** Summing everything in `expenses` therefore double-counts the annual result of a closed year. Exclude it — see below.
+- **The 8xxx block holds both extraordinary income and extraordinary expense** yet sits entirely in `expenses`. Its signed total is what matters, not its category.
+
+Rely on `category` for the statement side and on `number` for subtotals and ordering. `/accounts` returns deactivated accounts too (`isActive: false`), because historic bookings still reference them.
+
+### Unresolvable account ids
+
+`{mode}/accounts` lists one chart — the `rent` chart or the `condo` chart. A booking can reference an account from the *other* chart (this occurs in practice on condo properties booking against rent-chart accounts). Such an id is absent from `{mode}/accounts`, and `{mode}/accounts/{id}` returns `404` for it.
+
+This is why every booking carries `debitAccountNumber` and `creditAccountNumber` alongside the ids: **the number always resolves, even when the id does not.** A ledger export should read the numbers off the booking and never join at all.
+
+If you do need the label or category of such an account, retry the id under the other mode (`/rent/accounts/{id}` when you are exporting `condo`, and vice versa) and fall back to rendering the number alone rather than aborting the export. Never assume every `debitAccountId` / `creditAccountId` on a booking page resolves within the chart you fetched.
+
+### Closing entries
+
+Closing a fiscal year posts one ordinary booking — nothing about it is a special record type:
+
+- `type` is `closing_entry`, and it is the only booking touching account **9000**.
+- It is dated the **last day of the fiscal year** and carries `reference` `A` + the 6-digit fiscal-year id (e.g. `A000031`).
+- **Profit:** debit 9000 / credit **2990** (`Jahresgewinn oder -verlust`). **Loss:** the reverse, debit 2990 / credit 9000.
+
+Consequences for a consumer:
+
+- **Income statement (Erfolgsrechnung):** exclude the closing entry, or the result appears twice — once as the revenue/expense movement and once as the balance of 9000. Filter it out by `type != closing_entry`, or equivalently by skipping bookings that touch account 9000.
+- **Balance sheet (Bilanz):** *include* it. Account 2990 is a `liabilities` account, and after closing it carries the annual result, which is what makes the closed year balance.
+
+**Locked is not closed.** `FiscalYear.isLocked` means bookings can no longer be added or changed; it can be set and lifted on its own. Whether the year has been *closed* is a separate question — answered by whether a `closing_entry` booking exists for it. A year can be locked without a closing entry, and closed without being locked.
+
+### VAT
+
+Fairwalter does **not** track tax codes or tax rates on bookings. There is no VAT field to export, and no way to split an amount into net and tax. Amounts are exactly as booked.
+
+### The `reference` field
+
+`reference` groups the bookings that came out of one source document. Every booking generated from the same invoice carries that invoice's reference, so grouping a page of bookings by `reference` reconstructs the documents behind them. The first character indicates the document type:
+
+| Prefix | Source document                |
+|--------|--------------------------------|
+| `D`    | Debitor (outgoing) invoice     |
+| `K`    | Creditor (incoming) invoice    |
+| `G`    | Creditor reimbursement         |
+| `N`    | Ancillary-expense settlement   |
+| `L`    | Vacancy                        |
+| `M`    | Manual booking                 |
+| `A`    | Closing entry                  |
+
+Two limits, both load-bearing:
+
+- **It is not a voucher id.** The sequence is per customer, and a combined invoice re-stamps its sub-invoices with the parent's reference — so one reference can legitimately span several invoices. Use it for grouping, never as a primary key.
+- **Do not derive the booking type from the prefix.** Historic and migrated data mixes them (creditor bookings carrying `M`, ancillary bookings carrying `D`). The `type` field is authoritative.
+
+On `manual` bookings `reference` is whatever the user typed, so it need not follow any of this.
+
+### Building a Bilanz and an Erfolgsrechnung
+
+1. **Pick the fiscal year.** `GET /{mode}/fiscal-years` → note the `id`, `starts`, `ends`. `type: accounting` years are per property; `type: consolidation` years roll up a mandate.
+2. **Fetch the chart.** `GET /{mode}/accounts?limit=100` (paginate) → map `id` → `{number, label, category, group}`. `category` decides the statement side, `group` gives you the subtotal headings, `number` the ordering.
+3. **Fetch opening balances.** `GET /{mode}/opening-balances?filter[fiscalYearId]={id}&limit=100` (paginate) → map `accountId` → signed `amount`. Accounts with no row open at `0`.
+4. **Fetch the journal.** `GET /{mode}/bookings?filter[fiscalYearId]={id}&limit=500` (paginate). The fiscal-year filter resolves to that year's property and date range for you.
+5. **Accumulate.** For each booking add `amount` to its `debitAccountId` and subtract it from its `creditAccountId`. That yields `signed_movement` per account.
+6. **Erfolgsrechnung** — movement only, opening balances are irrelevant. Take accounts with `category` `revenue` or `expenses`, **skip the closing entry**, and report `-signed_movement` for revenue (so income reads positive) and `signed_movement` for expenses. Result = revenue − expenses.
+7. **Bilanz** — `opening_balance + signed_movement` for accounts with `category` `assets` or `liabilities`, **including** the closing entry.
+
+**Reconciliation checks** — run these before trusting the output:
+
+- Every booking page: `Σ debits = Σ credits` by construction, so the signed movement across *all* accounts must be `0`.
+- Closed year: `Σ assets = −Σ liabilities` (Aktiven = Passiven), and `Σ revenue + Σ expenses + balance(9000) = 0`.
+- Open year (no closing entry yet): `Σ assets + Σ liabilities = −(Σ revenue + Σ expenses)` — the difference between Aktiven and Passiven *is* the year's result.
+
+### Worked example
+
+One property, fiscal year `31` (2025). Opening balances:
+
+| Account | Category    | `amount`     |
+|---------|-------------|--------------|
+| 1020 Bank | assets    | `"15230.45"` |
+| 2000 Kreditoren | liabilities | `"-4100.00"` |
+| 2800 Kapital der Eigentümer | liabilities | `"-11130.45"` |
+
+Opening sums to `0`, as it must. Three bookings during the year:
+
+| Date | Debit | Credit | `amount` | `type` |
+|------|-------|--------|----------|--------|
+| 2025-03-01 | 1100 Forderungen Mieter | 3000 Mietzins | `"1700.00"` | `debitor_invoice` |
+| 2025-03-05 | 1020 Bank | 1100 Forderungen Mieter | `"1700.00"` | `debitor_invoice` |
+| 2025-04-10 | 4131 Betriebskosten | 2000 Kreditoren | `"320.00"` | `creditor_invoice` |
+
+Signed movements: `1020 +1700.00`, `1100 0.00`, `3000 −1700.00`, `4131 +320.00`, `2000 −320.00`.
+
+**Erfolgsrechnung:** Ertrag `−(−1700.00) = 1700.00`, Aufwand `320.00`, result **`1380.00`** profit.
+
+Closing therefore posts `debit 9000 / credit 2990`, `"1380.00"`, dated `2025-12-31`, `type: closing_entry`, `reference: "A000031"`.
+
+**Bilanz after closing:**
+
+| Account | Opening | Movement | Closing |
+|---------|---------|----------|---------|
+| 1020 Bank | `15230.45` | `+1700.00` | `16930.45` |
+| 1100 Forderungen | `0.00` | `0.00` | `0.00` |
+| 2000 Kreditoren | `-4100.00` | `-320.00` | `-4420.00` |
+| 2800 Kapital | `-11130.45` | `0.00` | `-11130.45` |
+| 2990 Jahresgewinn | `0.00` | `-1380.00` | `-1380.00` |
+
+Aktiven `16930.45`, Passiven `−16930.45` — balanced. Before the closing entry existed, Aktiven `16930.45` minus Passiven `15550.45` would have left exactly the `1380.00` result.
+
+## Common workflows
+
+**Find every object in a property.** Call `GET /public-api/v1/{mode}/objects?filter[propertyId]={id}` and walk pages until `meta.pagination.hasMore` is `false`.
+
+**Find buildings by address.** Call `GET /public-api/v1/{mode}/buildings?q=Bahnhofstrasse` and inspect `street` / `houseNumber` on the returned items.
+
+**Fetch every resource of a type.** Start at `offset=0` with the endpoint's maximum `limit`, increment `offset` by `data.length` each round, stop when `meta.pagination.hasMore` is `false`.
+
+**Export a year's journal for an accounting package.** Resolve the fiscal year, then page `/{mode}/bookings?filter[fiscalYearId]={id}&limit=500`. Each row already carries `debitAccountNumber` and `creditAccountNumber`, so no account lookup is needed at all — pull `/{mode}/accounts` only if your target system also wants account labels. Group by `reference` if it wants one voucher per document.
+
+## Read-only safety
+
+The API exposes `GET` operations only. No write, update, or delete endpoints exist — calling this API never modifies Fairwalter data.
+
+---
+
+## About this repository
+
+Every file here except `tools/` and `.github/` is generated by [`tools/publish.py`](tools/publish.py) from the live specification — edit the API, not the Markdown.
+
+This documentation is licensed under [CC BY 4.0](LICENSE). Attribution to Fairwalter AG is required.
+
+# Account
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/{mode}/accounts` | `listAccounts` | List the chart of accounts |
+| GET | `/public-api/v1/{mode}/accounts/{id}` | `getAccount` | Get a single account |
+
+## GET /public-api/v1/{mode}/accounts
+
+**List the chart of accounts** — `listAccounts`
+
+Returns the customer's own chart of accounts for the selected `{mode}` chart
+(rent/condo). The chart is customer-level, so every token of the customer sees the
+same accounts.
+
+Narrow with `filter[category]`. Use `q` to search by `label` (substring) or
+`number` (prefix).
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: number, label. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[category]` | query | string: `assets` \| `liabilities` \| `revenue` \| `expenses` |  | Restricts results to records matching the given category. |
+| `sort` | query | string: `number` \| `-number` \| `id` \| `-id` |  | Sort field. Prefix with `-` for descending order (e.g. `-number`). Allowed: number, id. |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** number, label
+- **Filterable:** `filter[category]` (`assets`, `liabilities`, `revenue`, `expenses`)
+- **Sortable:** `number`, `id` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [AccountApiResponse](#accountapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "number": 1020,
+      "label": "Bank",
+      "category": "assets",
+      "group": {
+        "id": 17,
+        "label": "Kapital der Eigentümer"
+      }
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/accounts/{id}
+
+**Get a single account** — `getAccount`
+
+Returns one account of the customer's own `{mode}` chart by id. Returns 404 when the
+account does not exist, is not on the `{mode}` chart, or belongs to another customer.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**Response** — `200` returns [AccountApiResponse](#accountapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Account not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "number": 1020,
+  "label": "Bank",
+  "category": "assets",
+  "group": {
+    "id": 17,
+    "label": "Kapital der Eigentümer"
+  }
+}
+```
+
+## Schemas
+
+### AccountApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `number` | integer | yes | Account number, e.g. 1000. |
+| `label` | string | yes |  |
+| `category` | [AccountCategory](#accountcategory) | yes |  |
+| `group` | [AccountGroupResponse](#accountgroupresponse) | yes |  |
+
+### AccountCategory
+
+String enum, 4 values.
+
+`assets`, `liabilities`, `revenue`, `expenses`
+
+### AccountGroupResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes | Stable id of the group. Groups are part of the chart of accounts, not customer data. |
+| `label` | string | yes | German group heading as it appears on a financial statement. |
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+# Asset
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/{mode}/assets` | `listAssets` | List assets |
+| GET | `/public-api/v1/{mode}/assets/{id}` | `getAsset` | Get asset details |
+
+## GET /public-api/v1/{mode}/assets
+
+**List assets** — `listAssets`
+
+Returns the assets (equipment/installations) of rental objects reachable for the
+selected `{mode}`. Each asset carries `roomId` and `objectId` FKs that resolve via
+`getRoom` and `getObject`.
+
+Scope with `filter[roomId]`, `filter[objectId]`, `filter[buildingId]`, or
+`filter[propertyId]`; use `q` to search across name, manufacturer, model and serial number.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name, manufacturer, model, serialNo. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[roomId]` | query | integer |  | Restricts results to records belonging to the given room id. |
+| `filter[objectId]` | query | integer |  | Restricts results to records belonging to the given object id. |
+| `filter[buildingId]` | query | integer |  | Restricts results to records belonging to the given building id. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `nextServiceDate` \| `-nextServiceDate` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, nextServiceDate. |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name, manufacturer, model, serialNo
+- **Filterable:** `filter[roomId]`, `filter[objectId]`, `filter[buildingId]`, `filter[propertyId]`
+- **Sortable:** `id`, `name`, `nextServiceDate` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [AssetApiResponse](#assetapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "roomId": 301,
+      "objectId": 789,
+      "name": "Geschirrspüler",
+      "category": "Haushaltsgerät",
+      "description": "string",
+      "manufacturer": "string",
+      "model": "string",
+      "serialNo": "string",
+      "buildYear": 2021,
+      "dateOfPurchase": "2021-06-15",
+      "guaranteePeriodYears": 2,
+      "lifeExpectancyYears": 12,
+      "lastServiceDate": "2025-02-10",
+      "nextServiceDate": "2027-02-10",
+      "cost": "1890.00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/assets/{id}
+
+**Get asset details** — `getAsset`
+
+Returns a single asset by id, including its template `category`, identification
+(manufacturer, model, serial number), and service/guarantee dates.
+
+Use `listAssets` for discovery when the id is unknown. The `roomId` / `objectId` FKs
+link back to `getRoom` / `getObject`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**Response** — `200` returns [AssetApiResponse](#assetapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Asset not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "roomId": 301,
+  "objectId": 789,
+  "name": "Geschirrspüler",
+  "category": "Haushaltsgerät",
+  "description": "string",
+  "manufacturer": "string",
+  "model": "string",
+  "serialNo": "string",
+  "buildYear": 2021,
+  "dateOfPurchase": "2021-06-15",
+  "guaranteePeriodYears": 2,
+  "lifeExpectancyYears": 12,
+  "lastServiceDate": "2025-02-10",
+  "nextServiceDate": "2027-02-10",
+  "cost": "1890.00"
+}
+```
+
+## Schemas
+
+### AssetApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `roomId` | integer | yes | FK to the room this asset is located in. Resolve via `getRoom`. |
+| `objectId` | integer | yes | FK to the rental object this asset belongs to. Resolve via `getObject`. |
+| `name` | string | yes | Asset name, e.g. "Geschirrspüler". |
+| `category` | string · nullable |  | Asset template name (customer/system-defined), e.g. "Haushaltsgerät". Null when not based on a template. |
+| `description` | string · nullable |  |  |
+| `manufacturer` | string · nullable |  |  |
+| `model` | string · nullable |  |  |
+| `serialNo` | string · nullable |  | Serial number. Null when not recorded. |
+| `buildYear` | integer · nullable |  | Year the asset was built/manufactured. Null when not recorded. |
+| `dateOfPurchase` | string (date) · nullable |  | Date of purchase. Null when not recorded. |
+| `guaranteePeriodYears` | integer · nullable |  | Guarantee/warranty period in years. Null when not recorded. |
+| `lifeExpectancyYears` | integer · nullable |  | Expected life span in years. Null when not recorded. |
+| `lastServiceDate` | string (date) · nullable |  | Date of the last service. Null when not recorded. |
+| `nextServiceDate` | string (date) · nullable |  | Date of the next scheduled service. Null when not recorded. |
+| `cost` | string · nullable |  | Purchase/installation cost as a fixed two-decimal string. Sent as a string — never a float — to preserve precision. Null when not recorded. |
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+# Booking
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/{mode}/bookings` | `listBookings` | List bookings (journal) |
+| GET | `/public-api/v1/{mode}/bookings/{id}` | `getBooking` | Get a booking |
+
+## GET /public-api/v1/{mode}/bookings
+
+**List bookings (journal)** — `listBookings`
+
+Returns the journal entries reachable for the selected `{mode}`. Every booking is a
+double entry with exactly one debit and one credit account and a positive amount.
+
+The primary export flow is `filter[fiscalYearId]` (resolved to the year's
+property/mandate and date range). Narrow further with `filter[dateFrom]` /
+`filter[dateTo]` (inclusive range), `filter[accountId]` (debit or credit side),
+`filter[propertyId]`, or `filter[type]`. Use `q` to search by label or reference.
+This endpoint allows a larger page size (up to 500) for full-year exports.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `500`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: label, reference. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[fiscalYearId]` | query | integer |  | Restricts results to records belonging to the given fiscalYear id. |
+| `filter[dateFrom]` | query | string (date) |  | Lower (inclusive) bound: only records whose date is on or after this value. |
+| `filter[dateTo]` | query | string (date) |  | Upper (inclusive) bound: only records whose date is on or before this value. |
+| `filter[accountId]` | query | integer |  | Restricts results to records belonging to the given account id. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `filter[type]` | query | string: `debitor_invoice` \| `creditor_invoice` \| `ancillary_expense` \| `vacancy` \| `reimbursement_invoice` \| `manual` \| `closing_entry` |  | Restricts results to records matching the given type. |
+| `sort` | query | string: `date` \| `-date` \| `id` \| `-id` |  | Sort field. Prefix with `-` for descending order (e.g. `-date`). Allowed: date, id. |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** label, reference
+- **Filterable:** `filter[fiscalYearId]`, `filter[dateFrom]`, `filter[dateTo]`, `filter[accountId]`, `filter[propertyId]`, `filter[type]` (`debitor_invoice`, `creditor_invoice`, `ancillary_expense`, `vacancy`, `reimbursement_invoice`, `manual`, `closing_entry`)
+- **Sortable:** `date`, `id` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `500`
+
+**Response** — `200` returns a list envelope around [BookingApiResponse](#bookingapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "debitAccountId": 45,
+      "debitAccountNumber": 1100,
+      "creditAccountId": 12,
+      "creditAccountNumber": 3000,
+      "propertyId": 7,
+      "objectId": 789,
+      "date": "2025-03-01",
+      "label": "Mietzins März 2025, Bahnhofstrasse 1, 2.OG",
+      "reference": "RE-2025-0341",
+      "type": "debitor_invoice",
+      "amount": "1700.00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/bookings/{id}
+
+**Get a booking** — `getBooking`
+
+Returns a single journal entry by id. Returns 404 when it does not exist, is outside
+the token's scope, or does not belong to the selected `{mode}`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**Response** — `200` returns [BookingApiResponse](#bookingapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Booking not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "debitAccountId": 45,
+  "debitAccountNumber": 1100,
+  "creditAccountId": 12,
+  "creditAccountNumber": 3000,
+  "propertyId": 7,
+  "objectId": 789,
+  "date": "2025-03-01",
+  "label": "Mietzins März 2025, Bahnhofstrasse 1, 2.OG",
+  "reference": "RE-2025-0341",
+  "type": "debitor_invoice",
+  "amount": "1700.00"
+}
+```
+
+## Schemas
+
+### BookingApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `debitAccountId` | integer | yes | FK to the debit account (Soll). Resolve via `getAccount`. |
+| `debitAccountNumber` | integer | yes | Account number of the debit account, embedded so a ledger export needs no join. Resolves even when the account sits on the other `{mode}` chart and `getAccount` would 404. |
+| `creditAccountId` | integer | yes | FK to the credit account (Haben). Resolve via `getAccount`. |
+| `creditAccountNumber` | integer | yes | Account number of the credit account. See `debitAccountNumber`. |
+| `propertyId` | integer | yes | FK to the property. Resolve via `getProperty`. |
+| `objectId` | integer · nullable |  | FK to the object when the booking is attributable to a single object; otherwise null. |
+| `date` | string (date) | yes |  |
+| `label` | string | yes | Booking text. |
+| `reference` | string · nullable |  | Free-text reference (e.g. invoice number); null when none. |
+| `type` | [BookingType](#bookingtype) | yes |  |
+| `amount` | string | yes | Booking amount as a fixed two-decimal string — always positive (direction is given by the debit/credit accounts). |
+
+### BookingType
+
+String enum, 7 values.
+
+`debitor_invoice`, `creditor_invoice`, `ancillary_expense`, `vacancy`, `reimbursement_invoice`, `manual`, `closing_entry`
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+# Building
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/{mode}/buildings` | `listBuildings` | List buildings |
+| GET | `/public-api/v1/{mode}/buildings/{id}/files` | `listBuildingFiles` | List files of a building |
+| GET | `/public-api/v1/{mode}/buildings/{id}` | `getBuilding` | Get building details |
+
+## GET /public-api/v1/{mode}/buildings
+
+**List buildings** — `listBuildings`
+
+Returns buildings under reachable properties for the selected `{mode}`.
+
+Buildings sit between properties and objects in the resource hierarchy (`Mandate → Property → Building → Object`). Each building carries a `propertyId` FK that resolves via `getProperty`.
+
+Scope with `filter[propertyId]` (single property) or `filter[mandateId]` (every building under one mandate). Use `q` for free-text search across name, street, ZIP and city.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name, street, postcode, city. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `filter[mandateId]` | query | integer |  | Restricts results to records belonging to the given mandate id. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `street` \| `-street` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, street. |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name, street, postcode, city
+- **Filterable:** `filter[propertyId]`, `filter[mandateId]`
+- **Sortable:** `id`, `name`, `street` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [BuildingApiResponse](#buildingapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "propertyId": 1,
+      "name": "string",
+      "street": "string",
+      "houseNumber": "string",
+      "egid": "123456789",
+      "buildYear": 1998,
+      "lastRenovation": 2018,
+      "startOfRenting": "2021-01-01"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/buildings/{id}/files
+
+**List files of a building** — `listBuildingFiles`
+
+Returns the files attached to a building. Visible exactly when the building is visible via `getBuilding`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[category]` | query | string enum (18 values) |  | Restricts results to records matching the given category. One of: `finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `uploadedAt` \| `-uploadedAt` \| `fileSize` \| `-fileSize` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, uploadedAt, fileSize. |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name
+- **Filterable:** `filter[category]` (`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`)
+- **Sortable:** `id`, `name`, `uploadedAt`, `fileSize` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [FileApiResponse](#fileapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Parent resource not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 4711,
+      "name": "Hausordnung.pdf",
+      "category": "finance",
+      "mimeType": "application/pdf",
+      "fileSize": 184320,
+      "uploadedAt": "2026-03-14T09:12:00+01:00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/buildings/{id}
+
+**Get building details** — `getBuilding`
+
+Returns a single building by id, including its address, EGID, build year, and `startOfRenting` date.
+
+Use `listBuildings` for discovery when the id is unknown. The `propertyId` FK links back to `getProperty`; `getObject` / `listObjects` traverse down to objects inside this building.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**Response** — `200` returns [BuildingApiResponse](#buildingapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Building not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "propertyId": 1,
+  "name": "string",
+  "street": "string",
+  "houseNumber": "string",
+  "egid": "123456789",
+  "buildYear": 1998,
+  "lastRenovation": 2018,
+  "startOfRenting": "2021-01-01"
+}
+```
+
+## Schemas
+
+### BuildingApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `propertyId` | integer | yes | FK to the parent property. Resolve via `getProperty`. |
+| `name` | string | yes |  |
+| `street` | string | yes |  |
+| `houseNumber` | string | yes |  |
+| `egid` | string · nullable |  | Swiss federal building identifier (EGID), assigned by the Federal Statistical Office. Null when the building has no EGID on record. |
+| `buildYear` | integer · nullable |  | Year the building was constructed. Null when unknown. |
+| `lastRenovation` | integer · nullable |  | Year of the most recent renovation. Null when never renovated or unknown. |
+| `startOfRenting` | string (date) | yes | First day the building started accepting tenants (ISO 8601 date). |
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+### FileApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes | Resolve metadata via `getFile` and the binary via `downloadFile`. |
+| `name` | string | yes | File name as uploaded. |
+| `category` | [FileCategory](#filecategory) | yes |  |
+| `mimeType` | string | yes | Stored content type. |
+| `fileSize` | integer | yes | Size in bytes. |
+| `uploadedAt` | string (date-time) | yes | When the file was uploaded, ISO 8601. |
+
+### FileCategory
+
+String enum, 18 values.
+
+`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`
+
+# Contract
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/rent/contracts` | `listContracts` | List rent contracts |
+| GET | `/public-api/v1/rent/contracts/{id}/files` | `listContractFiles` | List files of a contract |
+| GET | `/public-api/v1/rent/contracts/{id}` | `getContract` | Get rent contract details |
+
+## GET /public-api/v1/rent/contracts
+
+**List rent contracts** — `listContracts`
+
+Returns rent contracts (tenancies) reachable by the token, including vacancy
+periods (`isVacancy: true`). Each row carries the derived `status`, the linked
+`persons`, and the `currentRent` effective today; the full rent version history
+is on the detail endpoint.
+
+Narrow with `filter[status]`, `filter[isVacancy]`, `filter[mainContractId]`,
+`filter[personId]`, `filter[objectId]`, `filter[propertyId]` or
+`filter[mandateId]`. Use `q` to search by linked person name.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name1, name2. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[status]` | query | string: `upcoming` \| `active` \| `noticed` \| `terminated` |  | Restricts results to records matching the given status. |
+| `filter[isVacancy]` | query | string: `true` \| `false` |  | Restricts results to records matching the given isVacancy. |
+| `filter[mainContractId]` | query | integer |  | Restricts results to records belonging to the given mainContract id. |
+| `filter[personId]` | query | integer |  | Restricts results to records belonging to the given person id. |
+| `filter[objectId]` | query | integer |  | Restricts results to records belonging to the given object id. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `filter[mandateId]` | query | integer |  | Restricts results to records belonging to the given mandate id. |
+| `sort` | query | string: `id` \| `-id` \| `starts` \| `-starts` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, starts. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name1, name2
+- **Filterable:** `filter[status]` (`upcoming`, `active`, `noticed`, `terminated`), `filter[isVacancy]` (`true`, `false`), `filter[mainContractId]`, `filter[personId]`, `filter[objectId]`, `filter[propertyId]`, `filter[mandateId]`
+- **Sortable:** `id`, `starts` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [ContractApiResponse](#contractapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "objectId": 789,
+      "mainContractId": 1,
+      "isVacancy": true,
+      "status": "upcoming",
+      "starts": "2024-04-01",
+      "ends": "2025-01-31",
+      "moveIn": "2025-01-31",
+      "moveOut": "2025-01-31",
+      "noticePeriodMonths": 3,
+      "possibleNoticeMonths": [
+        3,
+        6,
+        9
+      ],
+      "firstPossibleNotice": "2025-01-31",
+      "hasVat": true,
+      "qrReference": "string",
+      "termination": {
+        "noticedAt": "2025-01-31",
+        "noticedBy": "landlord"
+      },
+      "deposit": {
+        "type": "bank",
+        "amount": "4500.00",
+        "receivedAt": "2025-01-31",
+        "insuranceProvider": "string",
+        "insuranceNumber": "string"
+      },
+      "persons": [
+        {
+          "personId": 123,
+          "roles": [
+            "tenant"
+          ],
+          "isPrimary": true
+        }
+      ],
+      "currentRent": {
+        "starts": "2024-04-01",
+        "ends": "2025-01-31",
+        "netAmount": "1500.00",
+        "grossAmount": "1700.00",
+        "netAmountMonthly": "1500.00",
+        "grossAmountMonthly": "1700.00",
+        "billingCycle": 1,
+        "hasVat": true,
+        "referenceInterestRate": {
+          "yearMonth": "2024-03",
+          "rate": "1.50"
+        },
+        "indexBase": {
+          "yearMonth": "2020-12"
+        },
+        "inflationIndex": {
+          "yearMonth": "2024-11",
+          "value": "107.10"
+        },
+        "lastCostSettlement": "2025-06",
+        "ancillaryExpenses": [
+          {
+            "name": "Heizkosten",
+            "settlementMode": "flat",
+            "amount": "80.00"
+          }
+        ]
+      }
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/rent/contracts/{id}/files
+
+**List files of a contract** — `listContractFiles`
+
+Returns the files attached to a rent contract. Visible exactly when the contract is visible via `getContract`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[category]` | query | string enum (18 values) |  | Restricts results to records matching the given category. One of: `finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `uploadedAt` \| `-uploadedAt` \| `fileSize` \| `-fileSize` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, uploadedAt, fileSize. |
+| `id` | path | integer | yes |  |
+
+**List capabilities**
+
+- **Searchable (`q`):** name
+- **Filterable:** `filter[category]` (`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`)
+- **Sortable:** `id`, `name`, `uploadedAt`, `fileSize` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [FileApiResponse](#fileapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Parent resource not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 4711,
+      "name": "Hausordnung.pdf",
+      "category": "finance",
+      "mimeType": "application/pdf",
+      "fileSize": 184320,
+      "uploadedAt": "2026-03-14T09:12:00+01:00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/rent/contracts/{id}
+
+**Get rent contract details** — `getContract`
+
+Returns a single rent contract (or vacancy entry) by id, including the linked
+`persons`, deposit, notice details, the `currentRent`, and the full `rents`
+version history. Returns 404 when the contract does not exist, is not a rent
+contract, or is outside the token's scope.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+
+**Response** — `200` returns [ContractDetailApiResponse](#contractdetailapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Contract not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "rents": [
+    {
+      "starts": "2024-04-01",
+      "ends": "2025-01-31",
+      "netAmount": "1500.00",
+      "grossAmount": "1700.00",
+      "netAmountMonthly": "1500.00",
+      "grossAmountMonthly": "1700.00",
+      "billingCycle": 1,
+      "hasVat": true,
+      "referenceInterestRate": {
+        "yearMonth": "2024-03",
+        "rate": "1.50"
+      },
+      "indexBase": {
+        "yearMonth": "2020-12"
+      },
+      "inflationIndex": {
+        "yearMonth": "2024-11",
+        "value": "107.10"
+      },
+      "lastCostSettlement": "2025-06",
+      "ancillaryExpenses": [
+        {
+          "name": "Heizkosten",
+          "settlementMode": "flat",
+          "amount": "80.00"
+        }
+      ]
+    }
+  ],
+  "id": 1,
+  "objectId": 789,
+  "mainContractId": 1,
+  "isVacancy": true,
+  "status": "upcoming",
+  "starts": "2024-04-01",
+  "ends": "2025-01-31",
+  "moveIn": "2025-01-31",
+  "moveOut": "2025-01-31",
+  "noticePeriodMonths": 3,
+  "possibleNoticeMonths": [
+    3,
+    6,
+    9
+  ],
+  "firstPossibleNotice": "2025-01-31",
+  "hasVat": true,
+  "qrReference": "string",
+  "termination": {
+    "noticedAt": "2025-01-31",
+    "noticedBy": "landlord"
+  },
+  "deposit": {
+    "type": "bank",
+    "amount": "4500.00",
+    "receivedAt": "2025-01-31",
+    "insuranceProvider": "string",
+    "insuranceNumber": "string"
+  },
+  "persons": [
+    {
+      "personId": 123,
+      "roles": [
+        "tenant"
+      ],
+      "isPrimary": true
+    }
+  ],
+  "currentRent": {
+    "starts": "2024-04-01",
+    "ends": "2025-01-31",
+    "netAmount": "1500.00",
+    "grossAmount": "1700.00",
+    "netAmountMonthly": "1500.00",
+    "grossAmountMonthly": "1700.00",
+    "billingCycle": 1,
+    "hasVat": true,
+    "referenceInterestRate": {
+      "yearMonth": "2024-03",
+      "rate": "1.50"
+    },
+    "indexBase": {
+      "yearMonth": "2020-12"
+    },
+    "inflationIndex": {
+      "yearMonth": "2024-11",
+      "value": "107.10"
+    },
+    "lastCostSettlement": "2025-06",
+    "ancillaryExpenses": [
+      {
+        "name": "Heizkosten",
+        "settlementMode": "flat",
+        "amount": "80.00"
+      }
+    ]
+  }
+}
+```
+
+## Schemas
+
+### ContractApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `objectId` | integer | yes | FK to the object resource. Resolve via `getObject`. |
+| `mainContractId` | integer · nullable |  | FK to the main contract when this is a sub-contract (e.g. parking, basement); null otherwise. |
+| `isVacancy` | boolean | yes | True for vacancy entries (Leerstand). |
+| `status` | [ContractStatus](#contractstatus) | yes |  |
+| `starts` | string (date) | yes |  |
+| `ends` | string (date) · nullable |  | Null = open-ended; set + not noticed = fixed-term. |
+| `moveIn` | string (date) · nullable |  | Actual move-in date, if tracked. |
+| `moveOut` | string (date) · nullable |  | Actual move-out date, if tracked. |
+| `noticePeriodMonths` | integer | yes | Notice period in months. 0 for vacancy entries. |
+| `possibleNoticeMonths` | integer[] | yes | Months (1–12) in which notice may be given. Empty for vacancy entries. |
+| `firstPossibleNotice` | string (date) · nullable |  | Earliest date notice can be given; null if not set. |
+| `hasVat` | boolean | yes |  |
+| `qrReference` | string · nullable |  | Swiss QR-bill reference for rent payments; null if none. |
+| `termination` | [ContractTerminationResponse](#contractterminationresponse) · nullable |  | Notice details; set only once notice has been given. |
+| `deposit` | [ContractDepositResponse](#contractdepositresponse) · nullable |  | Security deposit; null when no deposit is recorded. |
+| `persons` | [RelatedPersonResponse](#relatedpersonresponse)[] | yes | Persons linked to the contract (tenants and residents merged). |
+| `currentRent` | [ContractRentResponse](#contractrentresponse) · nullable |  | The rent version effective today; null if none is effective. |
+
+### ContractStatus
+
+String enum, 4 values.
+
+`upcoming`, `active`, `noticed`, `terminated`
+
+### ContractTerminationResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `noticedAt` | string (date) | yes | Date notice was given. |
+| `noticedBy` | [NoticedBy](#noticedby) | yes |  |
+
+### NoticedBy
+
+String enum, 2 values.
+
+`landlord`, `tenant`
+
+### ContractDepositResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `type` | [DepositType](#deposittype) | yes |  |
+| `amount` | string | yes | Deposit amount as a fixed two-decimal string. |
+| `receivedAt` | string (date) · nullable |  | Date the deposit was received; null if not recorded. |
+| `insuranceProvider` | string · nullable |  | Insurance provider — only set when `type` is `insurance`. |
+| `insuranceNumber` | string · nullable |  | Insurance policy number — only set when `type` is `insurance`. |
+
+### DepositType
+
+String enum, 4 values.
+
+`bank`, `insurance`, `zinsli`, `other`
+
+### RelatedPersonResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `personId` | integer | yes | FK to the person resource. Resolve via `getPerson`. |
+| `roles` | string: `tenant` \| `owner` \| `resident`[] | yes | Roles this person holds on the entry. `tenant`/`owner` = signatory, `resident` = occupant; a person can hold both. `tenant` appears on rent contracts, `owner` on condo owners. |
+| `isPrimary` | boolean | yes | True for the single primary signatory (primary `tenant`/`owner`). Always false for pure residents. |
+
+### ContractRentResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `starts` | string (date) | yes | Start of this rent version. |
+| `ends` | string (date) · nullable |  | End of this rent version; null for the open-ended current version. |
+| `netAmount` | string | yes | Net rent per billing cycle, as stored. Fixed two-decimal string. |
+| `grossAmount` | string | yes | Gross rent per billing cycle (net + ancillary). Fixed two-decimal string. |
+| `netAmountMonthly` | string | yes | Derived monthly net rent (`netAmount / billingCycle`). Fixed two-decimal string. |
+| `grossAmountMonthly` | string | yes | Derived monthly gross rent (`grossAmount / billingCycle`). Fixed two-decimal string. |
+| `billingCycle` | integer: `1` \| `3` \| `6` \| `12` | yes | Months per billing cycle. |
+| `hasVat` | boolean | yes |  |
+| `referenceInterestRate` | [ReferenceInterestRateResponse](#referenceinterestrateresponse) · nullable |  | Reference interest rate this rent is based on, or null. |
+| `indexBase` | [IndexBaseResponse](#indexbaseresponse) · nullable |  | Inflation-index baseline this rent is anchored to, or null. |
+| `inflationIndex` | [InflationIndexResponse](#inflationindexresponse) · nullable |  | Inflation index this rent is based on, or null. |
+| `lastCostSettlement` | string · nullable |  | Last ancillary-cost settlement month, as `YYYY-MM`; null if never settled. |
+| `ancillaryExpenses` | [AncillaryExpenseResponse](#ancillaryexpenseresponse)[] | yes | Agreed ancillary-expense positions for this rent version. |
+
+### ReferenceInterestRateResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `yearMonth` | string | yes | Month the rate is valid from, as `YYYY-MM`. |
+| `rate` | string | yes | Reference interest rate as a percentage, decimal string (e.g. `"1.50"` means 1.50%). Sent as a string to preserve precision. |
+
+### IndexBaseResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `yearMonth` | string | yes | Baseline month, as `YYYY-MM`. |
+
+### InflationIndexResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `yearMonth` | string | yes | Month of the index figure, as `YYYY-MM`. |
+| `value` | string | yes | Index figure (index points) as a decimal string. Sent as a string to preserve precision. |
+
+### AncillaryExpenseResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | yes | Position label as configured on the account. |
+| `settlementMode` | [SettlementMode](#settlementmode) | yes |  |
+| `amount` | string · nullable |  | Fixed amount as a two-decimal string for `flat` positions; `null` for `settled` positions (those are collected via the gross/net difference). Sent as a string to preserve precision. |
+
+### SettlementMode
+
+String enum, 2 values.
+
+`flat`, `settled`
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+### FileApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes | Resolve metadata via `getFile` and the binary via `downloadFile`. |
+| `name` | string | yes | File name as uploaded. |
+| `category` | [FileCategory](#filecategory) | yes |  |
+| `mimeType` | string | yes | Stored content type. |
+| `fileSize` | integer | yes | Size in bytes. |
+| `uploadedAt` | string (date-time) | yes | When the file was uploaded, ISO 8601. |
+
+### FileCategory
+
+String enum, 18 values.
+
+`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`
+
+### ContractDetailApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `rents` | [ContractRentResponse](#contractrentresponse)[] | yes | Full rent version history, ordered by `starts`. |
+| `id` | integer | yes |  |
+| `objectId` | integer | yes | FK to the object resource. Resolve via `getObject`. |
+| `mainContractId` | integer · nullable |  | FK to the main contract when this is a sub-contract (e.g. parking, basement); null otherwise. |
+| `isVacancy` | boolean | yes | True for vacancy entries (Leerstand). |
+| `status` | [ContractStatus](#contractstatus) | yes |  |
+| `starts` | string (date) | yes |  |
+| `ends` | string (date) · nullable |  | Null = open-ended; set + not noticed = fixed-term. |
+| `moveIn` | string (date) · nullable |  | Actual move-in date, if tracked. |
+| `moveOut` | string (date) · nullable |  | Actual move-out date, if tracked. |
+| `noticePeriodMonths` | integer | yes | Notice period in months. 0 for vacancy entries. |
+| `possibleNoticeMonths` | integer[] | yes | Months (1–12) in which notice may be given. Empty for vacancy entries. |
+| `firstPossibleNotice` | string (date) · nullable |  | Earliest date notice can be given; null if not set. |
+| `hasVat` | boolean | yes |  |
+| `qrReference` | string · nullable |  | Swiss QR-bill reference for rent payments; null if none. |
+| `termination` | [ContractTerminationResponse](#contractterminationresponse) · nullable |  | Notice details; set only once notice has been given. |
+| `deposit` | [ContractDepositResponse](#contractdepositresponse) · nullable |  | Security deposit; null when no deposit is recorded. |
+| `persons` | [RelatedPersonResponse](#relatedpersonresponse)[] | yes | Persons linked to the contract (tenants and residents merged). |
+| `currentRent` | [ContractRentResponse](#contractrentresponse) · nullable |  | The rent version effective today; null if none is effective. |
+
+# Damage
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/{mode}/damages` | `listDamages` | List damages |
+| GET | `/public-api/v1/{mode}/damages/{id}/files` | `listDamageFiles` | List files of a damage |
+| GET | `/public-api/v1/{mode}/damages/{id}` | `getDamage` | Get damage details |
+
+## GET /public-api/v1/{mode}/damages
+
+**List damages** — `listDamages`
+
+Returns the damages (repair tickets) reachable for the selected `{mode}`. Each
+damage is anchored to a building (`buildingId`) and optionally pinned to an object
+(`objectId`), an asset (`assetId`), and an assigned contractor (`serviceProviderId`).
+
+Scope with `filter[status]`, `filter[serviceProviderId]`, `filter[objectId]`,
+`filter[buildingId]`, or `filter[propertyId]`; use `q` to search across title and description.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: title, description. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[status]` | query | string: `new` \| `offer_requested` \| `order_placed` \| `invoice_pending` \| `correction_needed` \| `finished` |  | Restricts results to records matching the given status. |
+| `filter[serviceProviderId]` | query | integer |  | Restricts results to records belonging to the given serviceProvider id. |
+| `filter[objectId]` | query | integer |  | Restricts results to records belonging to the given object id. |
+| `filter[buildingId]` | query | integer |  | Restricts results to records belonging to the given building id. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `sort` | query | string: `id` \| `-id` \| `dateOfDamage` \| `-dateOfDamage` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, dateOfDamage. |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** title, description
+- **Filterable:** `filter[status]` (`new`, `offer_requested`, `order_placed`, `invoice_pending`, `correction_needed`, `finished`), `filter[serviceProviderId]`, `filter[objectId]`, `filter[buildingId]`, `filter[propertyId]`
+- **Sortable:** `id`, `dateOfDamage` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [DamageApiResponse](#damageapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "buildingId": 12,
+      "propertyId": 7,
+      "objectId": 789,
+      "assetId": 4021,
+      "serviceProviderId": 55,
+      "status": "new",
+      "title": "Geschirrspüler undicht",
+      "description": "string",
+      "cause": "string",
+      "dateOfDamage": "2026-05-28",
+      "estimatedCost": "350.00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/damages/{id}/files
+
+**List files of a damage** — `listDamageFiles`
+
+Returns the files attached to a damage. Visible exactly when the damage is visible via `getDamage`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[category]` | query | string enum (18 values) |  | Restricts results to records matching the given category. One of: `finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `uploadedAt` \| `-uploadedAt` \| `fileSize` \| `-fileSize` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, uploadedAt, fileSize. |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name
+- **Filterable:** `filter[category]` (`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`)
+- **Sortable:** `id`, `name`, `uploadedAt`, `fileSize` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [FileApiResponse](#fileapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Parent resource not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 4711,
+      "name": "Hausordnung.pdf",
+      "category": "finance",
+      "mimeType": "application/pdf",
+      "fileSize": 184320,
+      "uploadedAt": "2026-03-14T09:12:00+01:00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/damages/{id}
+
+**Get damage details** — `getDamage`
+
+Returns a single damage by id, including its status, title, description, cause,
+date, and estimated cost, plus the building/object/asset/service-provider it relates to.
+
+Use `listDamages` for discovery when the id is unknown.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**Response** — `200` returns [DamageApiResponse](#damageapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Damage not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "buildingId": 12,
+  "propertyId": 7,
+  "objectId": 789,
+  "assetId": 4021,
+  "serviceProviderId": 55,
+  "status": "new",
+  "title": "Geschirrspüler undicht",
+  "description": "string",
+  "cause": "string",
+  "dateOfDamage": "2026-05-28",
+  "estimatedCost": "350.00"
+}
+```
+
+## Schemas
+
+### DamageApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `buildingId` | integer | yes | FK to the building the damage is anchored to (always set). Resolve via `getBuilding`. |
+| `propertyId` | integer | yes | FK to the property, derived via the building. Resolve via `getProperty`. |
+| `objectId` | integer | yes | FK to the rental object the damage concerns (always set). Resolve via `getObject`. |
+| `assetId` | integer · nullable |  | FK to the asset, set when the damage concerns a specific asset. Null otherwise. |
+| `serviceProviderId` | integer · nullable |  | FK to the assigned repair contractor. Null when none assigned. Resolve via `getServiceProvider`. |
+| `status` | [DamageStatus](#damagestatus) | yes |  |
+| `title` | string | yes | Short description / title of the damage. |
+| `description` | string · nullable |  | Detailed damage description. Null when not recorded. |
+| `cause` | string · nullable |  | Cause / reason for the damage. Null when not recorded. |
+| `dateOfDamage` | string (date) · nullable |  | Date the damage occurred. Null when not recorded. |
+| `estimatedCost` | string · nullable |  | Estimated repair cost as a fixed two-decimal string. Sent as a string — never a float — to preserve precision. Null when not recorded. |
+
+### DamageStatus
+
+String enum, 6 values.
+
+`new`, `offer_requested`, `order_placed`, `invoice_pending`, `correction_needed`, `finished`
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+### FileApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes | Resolve metadata via `getFile` and the binary via `downloadFile`. |
+| `name` | string | yes | File name as uploaded. |
+| `category` | [FileCategory](#filecategory) | yes |  |
+| `mimeType` | string | yes | Stored content type. |
+| `fileSize` | integer | yes | Size in bytes. |
+| `uploadedAt` | string (date-time) | yes | When the file was uploaded, ISO 8601. |
+
+### FileCategory
+
+String enum, 18 values.
+
+`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`
+
+# DebitorInvoice
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/{mode}/debitor-invoices` | `listDebitorInvoices` | List debitor invoices |
+| GET | `/public-api/v1/{mode}/debitor-invoices/{id}` | `getDebitorInvoice` | Get debitor invoice details |
+
+## GET /public-api/v1/{mode}/debitor-invoices
+
+**List debitor invoices** — `listDebitorInvoices`
+
+Returns the debitor invoices (receivables issued to tenants/owners) reachable for
+the selected `{mode}`, across all sources (rent, ancillary-expense settlements,
+final accounts, manual invoices). Draft and vacancy invoices are never returned.
+Each row carries the derived `status`, `isOverdue`, the aggregated `paidAmount` /
+`openAmount` balance, and the linked recipient `persons`; the inline `positions`
+and `payments` are on the detail endpoint.
+
+Narrow with `filter[status]`, `filter[isOverdue]` (the dunning filter),
+`filter[type]`, `filter[personId]` (the tenant-portal balance filter),
+`filter[contractId]`, `filter[objectId]`, `filter[propertyId]`,
+`filter[mandateId]`, or the `filter[dueDateFrom]` / `filter[dueDateTo]` range.
+Use `q` to search by invoice number or label.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: reference, label. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[status]` | query | string: `sent` \| `partially_paid` \| `paid` \| `overpaid` |  | Restricts results to records matching the given status. |
+| `filter[isOverdue]` | query | string: `true` \| `false` |  | Restricts results to records matching the given isOverdue. |
+| `filter[type]` | query | string: `rent` \| `ancillary_expense` \| `final_account` \| `manual` |  | Restricts results to records matching the given type. |
+| `filter[personId]` | query | integer |  | Restricts results to records belonging to the given person id. |
+| `filter[contractId]` | query | integer |  | Restricts results to records belonging to the given contract id. |
+| `filter[objectId]` | query | integer |  | Restricts results to records belonging to the given object id. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `filter[mandateId]` | query | integer |  | Restricts results to records belonging to the given mandate id. |
+| `filter[dueDateFrom]` | query | string (date) |  | Lower (inclusive) bound: only records whose dueDate is on or after this value. |
+| `filter[dueDateTo]` | query | string (date) |  | Upper (inclusive) bound: only records whose dueDate is on or before this value. |
+| `sort` | query | string: `id` \| `-id` \| `invoiceDate` \| `-invoiceDate` \| `dueDate` \| `-dueDate` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, invoiceDate, dueDate. |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** reference, label
+- **Filterable:** `filter[status]` (`sent`, `partially_paid`, `paid`, `overpaid`), `filter[isOverdue]` (`true`, `false`), `filter[type]` (`rent`, `ancillary_expense`, `final_account`, `manual`), `filter[personId]`, `filter[contractId]`, `filter[objectId]`, `filter[propertyId]`, `filter[mandateId]`, `filter[dueDateFrom]`, `filter[dueDateTo]`
+- **Sortable:** `id`, `invoiceDate`, `dueDate` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [DebitorInvoiceApiResponse](#debitorinvoiceapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "contractId": 456,
+      "objectId": 789,
+      "propertyId": 7,
+      "reference": "100001234",
+      "label": "Mietzins Juni 2026",
+      "type": "rent",
+      "status": "sent",
+      "isOverdue": true,
+      "invoiceDate": "2026-05-20",
+      "dueDate": "2026-06-01",
+      "periodFrom": "2025-01-31",
+      "periodTo": "2025-01-31",
+      "currency": "CHF",
+      "amount": "1700.00",
+      "paidAmount": "1000.00",
+      "openAmount": "700.00",
+      "qrReference": "string",
+      "reminderLevel": 1,
+      "lastReminderAt": "2025-01-31",
+      "persons": [
+        {
+          "personId": 123,
+          "isPrimary": true
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/debitor-invoices/{id}
+
+**Get debitor invoice details** — `getDebitorInvoice`
+
+Returns a single debitor invoice by id, including the recipient `persons`, the
+inline `positions` and matched `payments`, and the derived `status` / `isOverdue`
+and `paidAmount` / `openAmount` balance. Returns 404 when the invoice does not
+exist, is a draft or vacancy invoice, is outside the token's scope, or does not
+belong to the selected `{mode}`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**Response** — `200` returns [DebitorInvoiceDetailApiResponse](#debitorinvoicedetailapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Debitor invoice not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "positions": [
+    {
+      "label": "Nettomiete",
+      "type": "normal",
+      "amount": "1500.00"
+    }
+  ],
+  "payments": [
+    {
+      "paidAt": "2026-06-05",
+      "amount": "1000.00"
+    }
+  ],
+  "id": 1,
+  "contractId": 456,
+  "objectId": 789,
+  "propertyId": 7,
+  "reference": "100001234",
+  "label": "Mietzins Juni 2026",
+  "type": "rent",
+  "status": "sent",
+  "isOverdue": true,
+  "invoiceDate": "2026-05-20",
+  "dueDate": "2026-06-01",
+  "periodFrom": "2025-01-31",
+  "periodTo": "2025-01-31",
+  "currency": "CHF",
+  "amount": "1700.00",
+  "paidAmount": "1000.00",
+  "openAmount": "700.00",
+  "qrReference": "string",
+  "reminderLevel": 1,
+  "lastReminderAt": "2025-01-31",
+  "persons": [
+    {
+      "personId": 123,
+      "isPrimary": true
+    }
+  ]
+}
+```
+
+## Schemas
+
+### DebitorInvoiceApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `contractId` | integer | yes | FK to the contract the invoice belongs to. Resolve via `getContract`. |
+| `objectId` | integer | yes | FK to the object, derived via the contract. Resolve via `getObject`. |
+| `propertyId` | integer | yes | FK to the property, derived via the contract. Resolve via `getProperty`. |
+| `reference` | string | yes | Invoice number. |
+| `label` | string | yes | Human-readable invoice label. |
+| `type` | [DebitorInvoiceType](#debitorinvoicetype) | yes |  |
+| `status` | [DebitorInvoiceStatus](#debitorinvoicestatus) | yes |  |
+| `isOverdue` | boolean | yes | Derived: the due date has passed and the invoice is not settled (not paid/overpaid). |
+| `invoiceDate` | string (date) | yes |  |
+| `dueDate` | string (date) | yes |  |
+| `periodFrom` | string (date) · nullable |  | Billing period start (rent invoices); null when not applicable. |
+| `periodTo` | string (date) · nullable |  | Billing period end (rent invoices); null when not applicable. |
+| `currency` | string | yes |  |
+| `amount` | string | yes | Invoice total as a fixed two-decimal string. Sent as a string — never a float — to preserve precision. |
+| `paidAmount` | string | yes | Sum of matched payments as a fixed two-decimal string — derived. |
+| `openAmount` | string | yes | Outstanding balance (`amount - paidAmount`) as a fixed two-decimal string — derived. Negative when overpaid. |
+| `qrReference` | string · nullable |  | Swiss QR-bill reference; null if none. |
+| `reminderLevel` | integer | yes | Dunning level, 0–3. |
+| `lastReminderAt` | string (date) · nullable |  | When the last reminder was created; null if none. |
+| `persons` | [DebitorInvoicePersonResponse](#debitorinvoicepersonresponse)[] | yes | Persons the invoice is addressed to (recipients). |
+
+### DebitorInvoiceType
+
+String enum, 4 values.
+
+`rent`, `ancillary_expense`, `final_account`, `manual`
+
+### DebitorInvoiceStatus
+
+String enum, 4 values.
+
+`sent`, `partially_paid`, `paid`, `overpaid`
+
+### DebitorInvoicePersonResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `personId` | integer | yes | FK to the person resource. Resolve via `getPerson`. |
+| `isPrimary` | boolean | yes | True for the primary recipient of the invoice. |
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+### DebitorInvoiceDetailApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `positions` | [DebitorInvoicePositionResponse](#debitorinvoicepositionresponse)[] | yes | Invoice line items, ordered by position. |
+| `payments` | [DebitorInvoicePaymentResponse](#debitorinvoicepaymentresponse)[] | yes | Payments matched to the invoice. |
+| `id` | integer | yes |  |
+| `contractId` | integer | yes | FK to the contract the invoice belongs to. Resolve via `getContract`. |
+| `objectId` | integer | yes | FK to the object, derived via the contract. Resolve via `getObject`. |
+| `propertyId` | integer | yes | FK to the property, derived via the contract. Resolve via `getProperty`. |
+| `reference` | string | yes | Invoice number. |
+| `label` | string | yes | Human-readable invoice label. |
+| `type` | [DebitorInvoiceType](#debitorinvoicetype) | yes |  |
+| `status` | [DebitorInvoiceStatus](#debitorinvoicestatus) | yes |  |
+| `isOverdue` | boolean | yes | Derived: the due date has passed and the invoice is not settled (not paid/overpaid). |
+| `invoiceDate` | string (date) | yes |  |
+| `dueDate` | string (date) | yes |  |
+| `periodFrom` | string (date) · nullable |  | Billing period start (rent invoices); null when not applicable. |
+| `periodTo` | string (date) · nullable |  | Billing period end (rent invoices); null when not applicable. |
+| `currency` | string | yes |  |
+| `amount` | string | yes | Invoice total as a fixed two-decimal string. Sent as a string — never a float — to preserve precision. |
+| `paidAmount` | string | yes | Sum of matched payments as a fixed two-decimal string — derived. |
+| `openAmount` | string | yes | Outstanding balance (`amount - paidAmount`) as a fixed two-decimal string — derived. Negative when overpaid. |
+| `qrReference` | string · nullable |  | Swiss QR-bill reference; null if none. |
+| `reminderLevel` | integer | yes | Dunning level, 0–3. |
+| `lastReminderAt` | string (date) · nullable |  | When the last reminder was created; null if none. |
+| `persons` | [DebitorInvoicePersonResponse](#debitorinvoicepersonresponse)[] | yes | Persons the invoice is addressed to (recipients). |
+
+### DebitorInvoicePositionResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `label` | string | yes | Line-item label. |
+| `type` | [InvoicePositionType](#invoicepositiontype) | yes |  |
+| `amount` | string | yes | Line-item amount as a fixed two-decimal string. Sent as a string — never a float — to preserve precision. |
+
+### InvoicePositionType
+
+String enum, 9 values.
+
+`normal`, `vat`, `rent_net`, `rent_ancillary_expenses_actual`, `rent_ancillary_expenses_flat`, `ae_floating_reduction`, `ae_costs`, `administration_fee`, `rounding`
+
+### DebitorInvoicePaymentResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `paidAt` | string (date) | yes | Date the payment was received. |
+| `amount` | string | yes | Payment amount as a fixed two-decimal string. Sent as a string — never a float — to preserve precision. |
+
+# File
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/files/{id}/content` | `downloadFile` | Download a file |
+| GET | `/public-api/v1/files/{id}` | `getFile` | Get file metadata |
+
+## GET /public-api/v1/files/{id}/content
+
+**Download a file** — `downloadFile`
+
+Streams the file's bytes as an attachment, named as it was uploaded. Visibility is
+identical to `getFile`. Counts against the ordinary request rate limit.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+
+| Status | Description |
+| --- | --- |
+| `200` | The file, as an attachment. |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | File not found |
+| `429` | Rate limit exceeded |
+
+## GET /public-api/v1/files/{id}
+
+**Get file metadata** — `getFile`
+
+Returns a file's metadata and the attachments of it you may see. There is no top-level
+`category`: the category belongs to the attachment, and one file can be attached to
+several owners with a different category on each.
+
+A file whose only owners are outside your scope, or of a kind this API does not expose,
+is indistinguishable from one that does not exist. Use `downloadFile` for the binary.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+
+**Response** — `200` returns [FileDetailApiResponse](#filedetailapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | File not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "name": "Hausordnung.pdf",
+  "mimeType": "application/pdf",
+  "fileSize": 184320,
+  "uploadedAt": "2026-03-14T09:12:00+01:00",
+  "owners": [
+    {
+      "type": "property",
+      "id": 12,
+      "category": "finance"
+    }
+  ]
+}
+```
+
+## Schemas
+
+### FileDetailApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `name` | string | yes | File name as uploaded. |
+| `mimeType` | string | yes | Stored content type. |
+| `fileSize` | integer | yes | Size in bytes. |
+| `uploadedAt` | string (date-time) | yes | When the file was uploaded, ISO 8601. |
+| `owners` | [FileOwnerResponse](#fileownerresponse)[] | yes | The visible attachments of this file. Never empty — a file with no visible owner returns 404. There is no top-level `category`: it belongs to the attachment, and one file can be attached to several owners with a different category on each. |
+
+### FileOwnerResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `type` | [FileOwnerType](#fileownertype) | yes |  |
+| `id` | integer | yes | Id of that object, resolvable on its own resource. |
+| `category` | [FileCategory](#filecategory) | yes |  |
+
+### FileOwnerType
+
+String enum, 9 values.
+
+`property`, `building`, `object`, `damage`, `contract`, `owner`, `person`, `mandate`, `user`
+
+### FileCategory
+
+String enum, 18 values.
+
+`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`
+
+# FiscalYear
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/{mode}/fiscal-years` | `listFiscalYears` | List fiscal years |
+| GET | `/public-api/v1/{mode}/fiscal-years/{id}` | `getFiscalYear` | Get a fiscal year |
+
+## GET /public-api/v1/{mode}/fiscal-years
+
+**List fiscal years** — `listFiscalYears`
+
+Returns the fiscal years reachable for the selected `{mode}`: regular accounting
+years (per property) and consolidation years (per mandate). Internal
+ancillary-expense and reporting periods are never returned.
+
+Narrow with `filter[propertyId]` (accounting years), `filter[mandateId]`
+(consolidation years), `filter[type]`, or `filter[isLocked]`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search. Case-insensitive partial match; every word must match one of the searchable fields. Combine with filter[...] keys to narrow further. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `filter[mandateId]` | query | integer |  | Restricts results to records belonging to the given mandate id. |
+| `filter[type]` | query | string: `accounting` \| `consolidation` |  | Restricts results to records matching the given type. |
+| `filter[isLocked]` | query | string: `true` \| `false` |  | Restricts results to records matching the given isLocked. |
+| `sort` | query | string: `starts` \| `-starts` \| `id` \| `-id` |  | Sort field. Prefix with `-` for descending order (e.g. `-starts`). Allowed: starts, id. |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** Free-text search
+- **Filterable:** `filter[propertyId]`, `filter[mandateId]`, `filter[type]` (`accounting`, `consolidation`), `filter[isLocked]` (`true`, `false`)
+- **Sortable:** `starts`, `id` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [FiscalYearApiResponse](#fiscalyearapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "propertyId": 7,
+      "mandateId": null,
+      "label": "2025",
+      "type": "accounting",
+      "starts": "2025-01-01",
+      "ends": "2025-12-31",
+      "isLocked": true
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/fiscal-years/{id}
+
+**Get a fiscal year** — `getFiscalYear`
+
+Returns a single fiscal year by id. Returns 404 when it does not exist, is an
+internal ancillary-expense / reporting period, is outside the token's scope, or
+does not belong to the selected `{mode}`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**Response** — `200` returns [FiscalYearApiResponse](#fiscalyearapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Fiscal year not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "propertyId": 7,
+  "mandateId": null,
+  "label": "2025",
+  "type": "accounting",
+  "starts": "2025-01-01",
+  "ends": "2025-12-31",
+  "isLocked": true
+}
+```
+
+## Schemas
+
+### FiscalYearApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `propertyId` | integer · nullable |  | FK to the property. Set when `type` is `accounting`, otherwise null. |
+| `mandateId` | integer · nullable |  | FK to the mandate. Set when `type` is `consolidation`, otherwise null. |
+| `label` | string | yes | Human-readable label, e.g. the year. |
+| `type` | [FiscalYearType](#fiscalyeartype) | yes |  |
+| `starts` | string (date) | yes |  |
+| `ends` | string (date) | yes |  |
+| `isLocked` | boolean | yes | Bookings in this year can no longer be added or changed. Independent of whether the year has been closed: closing posts a `closing_entry` booking, locking is a separate flag that can be set and lifted on its own. |
+
+### FiscalYearType
+
+String enum, 2 values.
+
+`accounting`, `consolidation`
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+# Mandate
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/mandates` | `listMandates` | List mandates |
+| GET | `/public-api/v1/mandates/{id}/files` | `listMandateFiles` | List files of a mandate |
+| GET | `/public-api/v1/mandates/{id}` | `getMandate` | Get mandate details |
+
+## GET /public-api/v1/mandates
+
+**List mandates** — `listMandates`
+
+Returns mandates the calling token can reach.
+
+A mandate is the top of the Public API resource hierarchy: `Mandate → Property → Building → Object`. Every other resource lives under exactly one mandate, so this endpoint is the discovery starting point.
+
+No filter keys are exposed (mandates are not scoped by any other resource); use `q` for free-text search across the mandate name, second name, street, postal code and city. Read `type` on each returned mandate (`rent` or `condo`) to decide which `{mode}` to pass on related endpoints.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name1, name2, street, postcode, city. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name1, name2, street, postcode, city
+- **Sortable:** `id`, `name` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [MandateApiResponse](#mandateapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "name1": "Müller",
+      "name2": "Anna",
+      "contactType": "natural",
+      "type": "rent",
+      "salutation": "unspecified",
+      "email": "string",
+      "phone": "string",
+      "website": "string",
+      "address": {
+        "street": "string",
+        "houseNumber": "string",
+        "postcode": "string",
+        "city": "string",
+        "country": "string"
+      }
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/mandates/{id}/files
+
+**List files of a mandate** — `listMandateFiles`
+
+Returns the files attached to a mandate. Visible exactly when the mandate is visible via `getMandate`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[category]` | query | string enum (18 values) |  | Restricts results to records matching the given category. One of: `finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `uploadedAt` \| `-uploadedAt` \| `fileSize` \| `-fileSize` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, uploadedAt, fileSize. |
+| `id` | path | integer | yes |  |
+
+**List capabilities**
+
+- **Searchable (`q`):** name
+- **Filterable:** `filter[category]` (`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`)
+- **Sortable:** `id`, `name`, `uploadedAt`, `fileSize` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [FileApiResponse](#fileapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Parent resource not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 4711,
+      "name": "Hausordnung.pdf",
+      "category": "finance",
+      "mimeType": "application/pdf",
+      "fileSize": 184320,
+      "uploadedAt": "2026-03-14T09:12:00+01:00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/mandates/{id}
+
+**Get mandate details** — `getMandate`
+
+Returns a single mandate by id, including its contact, address, and `type` (`rent` or `condo`).
+
+Use `listMandates` for discovery when the id is unknown. The returned `type` determines which `{mode}` to pass on related endpoints (`getProperty`, `getBuilding`, `getObject`, and their list counterparts).
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+
+**Response** — `200` returns [MandateApiResponse](#mandateapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Mandate not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "name1": "Müller",
+  "name2": "Anna",
+  "contactType": "natural",
+  "type": "rent",
+  "salutation": "unspecified",
+  "email": "string",
+  "phone": "string",
+  "website": "string",
+  "address": {
+    "street": "string",
+    "houseNumber": "string",
+    "postcode": "string",
+    "city": "string",
+    "country": "string"
+  }
+}
+```
+
+## Schemas
+
+### MandateApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `name1` | string | yes | Primary name. For a private contact this is the family name; for an organization this is the full legal name. |
+| `name2` | string · nullable |  | Secondary name. For a private contact this is the given name(s); for an organization this is the secondary line (e.g. department or c/o). Null when not applicable. |
+| `contactType` | [ContactType](#contacttype) | yes |  |
+| `type` | [MandateType](#mandatetype) | yes |  |
+| `salutation` | [Salutation](#salutation) | yes |  |
+| `email` | string · nullable |  |  |
+| `phone` | string · nullable |  |  |
+| `website` | string · nullable |  |  |
+| `address` | [AddressDto](#addressdto) | yes |  |
+
+### ContactType
+
+String enum, 2 values.
+
+`natural`, `legal`
+
+### MandateType
+
+String enum, 2 values.
+
+`rent`, `condo`
+
+### Salutation
+
+String enum, 3 values.
+
+`unspecified`, `mrs`, `mr`
+
+### AddressDto
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `street` | string | yes |  |
+| `houseNumber` | string | yes |  |
+| `postcode` | string | yes |  |
+| `city` | string | yes |  |
+| `country` | string | yes |  |
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+### FileApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes | Resolve metadata via `getFile` and the binary via `downloadFile`. |
+| `name` | string | yes | File name as uploaded. |
+| `category` | [FileCategory](#filecategory) | yes |  |
+| `mimeType` | string | yes | Stored content type. |
+| `fileSize` | integer | yes | Size in bytes. |
+| `uploadedAt` | string (date-time) | yes | When the file was uploaded, ISO 8601. |
+
+### FileCategory
+
+String enum, 18 values.
+
+`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`
+
+# Object
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/{mode}/objects` | `listObjects` | List objects |
+| GET | `/public-api/v1/{mode}/objects/{id}/files` | `listObjectFiles` | List files of an object |
+| GET | `/public-api/v1/{mode}/objects/{id}` | `getObject` | Get object details |
+
+## GET /public-api/v1/{mode}/objects
+
+**List objects** — `listObjects`
+
+Returns rental objects under reachable buildings for the selected `{mode}`.
+
+Objects are the lowest level of the resource hierarchy (`Mandate → Property → Building → Object`). Each object carries a `buildingId` FK that resolves via `getBuilding`.
+
+Scope with `filter[buildingId]`, `filter[propertyId]`, or `filter[mandateId]` to narrow the result set. Use `q` for free-text search across name, EWID, building name, and street.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name, ewid, buildingName, street. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `filter[buildingId]` | query | integer |  | Restricts results to records belonging to the given building id. |
+| `filter[mandateId]` | query | integer |  | Restricts results to records belonging to the given mandate id. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `area` \| `-area` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, area. |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name, ewid, buildingName, street
+- **Filterable:** `filter[propertyId]`, `filter[buildingId]`, `filter[mandateId]`
+- **Sortable:** `id`, `name`, `area` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [ObjectApiResponse](#objectapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "buildingId": 1,
+      "name": "string",
+      "type": "residential_apartment",
+      "numberOfRooms": "3.5",
+      "area": "85.4",
+      "volume": "215",
+      "floor": 2,
+      "ewid": "001",
+      "quota": 50,
+      "hasVotingRight": true
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/objects/{id}/files
+
+**List files of an object** — `listObjectFiles`
+
+Returns the files attached to an object. Visible exactly when the object is visible via `getObject`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[category]` | query | string enum (18 values) |  | Restricts results to records matching the given category. One of: `finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `uploadedAt` \| `-uploadedAt` \| `fileSize` \| `-fileSize` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, uploadedAt, fileSize. |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name
+- **Filterable:** `filter[category]` (`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`)
+- **Sortable:** `id`, `name`, `uploadedAt`, `fileSize` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [FileApiResponse](#fileapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Parent resource not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 4711,
+      "name": "Hausordnung.pdf",
+      "category": "finance",
+      "mimeType": "application/pdf",
+      "fileSize": 184320,
+      "uploadedAt": "2026-03-14T09:12:00+01:00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/objects/{id}
+
+**Get object details** — `getObject`
+
+Returns a single rental object by id, including its type, dimensions, floor, EWID, and (for condo objects) ownership quota and voting right.
+
+Use `listObjects` for discovery when the id is unknown. The `buildingId` FK links back to `getBuilding`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**Response** — `200` returns [ObjectApiResponse](#objectapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Object not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "buildingId": 1,
+  "name": "string",
+  "type": "residential_apartment",
+  "numberOfRooms": "3.5",
+  "area": "85.4",
+  "volume": "215",
+  "floor": 2,
+  "ewid": "001",
+  "quota": 50,
+  "hasVotingRight": true
+}
+```
+
+## Schemas
+
+### ObjectApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `buildingId` | integer | yes | FK to the parent building. Resolve via `getBuilding`. |
+| `name` | string | yes |  |
+| `type` | [ObjectType](#objecttype) | yes |  |
+| `numberOfRooms` | string | yes | Number of rooms as a decimal string (e.g. "3.5"). Trailing zeros are trimmed. Sent as a string — never a float — to preserve precision. |
+| `area` | string | yes | Net floor area in m² as a decimal string. Trailing zeros are trimmed. Sent as a string — never a float — to preserve precision. |
+| `volume` | string | yes | Volume in m³ as a decimal string. Trailing zeros are trimmed. Sent as a string — never a float — to preserve precision. |
+| `floor` | integer | yes | Floor on which the object is located. Ground floor is 0; basement floors are negative. |
+| `ewid` | string · nullable |  | Swiss federal dwelling identifier (EWID), unique within an EGID. Null when the object has no EWID on record. |
+| `quota` | integer · nullable |  | Condominium ownership share. Set on condo objects; null for rental objects. |
+| `hasVotingRight` | boolean | yes | Whether the owner of this object holds a voting right at the condominium assembly. Meaningful for condo objects; defaults to false otherwise. |
+
+### ObjectType
+
+String enum, 41 values.
+
+`residential_apartment`, `residential_maisonette`, `residential_attic_flat`, `residential_stepped_flat`, `residential_studio`, `residential_single_room`, `residential_granny_flat`, `residential_loft`, `residential_furnished_flat`, `residential_detached_house`, `residential_row_house`, `residential_duplex_house`, `residential_chalet`, `residential_rustico`, `parking_space_outside`, `parking_space_outside_e`, `parking_carport`, `parking_carport_e`, `parking_space_inside`, `parking_space_inside_e`, `parking_garage`, `parking_moto_outside`, `parking_moto_inside`, `commercial_office`, `commercial_retail`, `commercial_doctor`, `commercial_advertising`, `commercial_workshop`, `commercial_hobby_room`, `commercial_atelier`, `commercial_antenna`, `storage_storage`, `gastronomy_restaurant`, `gastronomy_bar`, `gastronomy_cafe`, `agricultural_agricultural`, `industrial_industrial`, `construction_plot`, `investment_investment`, `vacation_vacation`, `other_other`
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+### FileApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes | Resolve metadata via `getFile` and the binary via `downloadFile`. |
+| `name` | string | yes | File name as uploaded. |
+| `category` | [FileCategory](#filecategory) | yes |  |
+| `mimeType` | string | yes | Stored content type. |
+| `fileSize` | integer | yes | Size in bytes. |
+| `uploadedAt` | string (date-time) | yes | When the file was uploaded, ISO 8601. |
+
+### FileCategory
+
+String enum, 18 values.
+
+`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`
+
+# OpeningBalance
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/{mode}/opening-balances` | `listOpeningBalances` | List opening balances |
+| GET | `/public-api/v1/{mode}/opening-balances/{id}` | `getOpeningBalance` | Get an opening balance |
+
+## GET /public-api/v1/{mode}/opening-balances
+
+**List opening balances** — `listOpeningBalances`
+
+Returns the opening balances (starting balances of balance-sheet accounts at the
+beginning of a fiscal year) reachable for the selected `{mode}`. Combined with the
+year's bookings, a consumer can reconstruct running balances.
+
+The primary use is `filter[fiscalYearId]` — all opening balances of a year. Narrow
+further with `filter[accountId]` or `filter[propertyId]`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search. Case-insensitive partial match; every word must match one of the searchable fields. Combine with filter[...] keys to narrow further. |
+| `filter[fiscalYearId]` | query | integer |  | Restricts results to records belonging to the given fiscalYear id. |
+| `filter[accountId]` | query | integer |  | Restricts results to records belonging to the given account id. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `sort` | query | string: `id` \| `-id` \| `accountId` \| `-accountId` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, accountId. |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** Free-text search
+- **Filterable:** `filter[fiscalYearId]`, `filter[accountId]`, `filter[propertyId]`
+- **Sortable:** `id`, `accountId` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [OpeningBalanceApiResponse](#openingbalanceapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "fiscalYearId": 31,
+      "accountId": 12,
+      "propertyId": 7,
+      "amount": "15230.45"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/opening-balances/{id}
+
+**Get an opening balance** — `getOpeningBalance`
+
+Returns a single opening balance by id. Returns 404 when it does not exist, is
+outside the token's scope, or does not belong to the selected `{mode}`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**Response** — `200` returns [OpeningBalanceApiResponse](#openingbalanceapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Opening balance not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "fiscalYearId": 31,
+  "accountId": 12,
+  "propertyId": 7,
+  "amount": "15230.45"
+}
+```
+
+## Schemas
+
+### OpeningBalanceApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `fiscalYearId` | integer | yes | FK to the fiscal year. Resolve via `getFiscalYear`. |
+| `accountId` | integer | yes | FK to the account. Resolve via `getAccount`. |
+| `propertyId` | integer | yes | FK to the property — opening balances are always per property, even under a consolidation fiscal year. |
+| `amount` | string | yes | Opening balance as a fixed two-decimal string. Negative for credit-side balances. Sent as a string — never a float — to preserve precision. |
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+# Owner
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/condo/owners` | `listOwners` | List condo owners |
+| GET | `/public-api/v1/condo/owners/{id}/files` | `listOwnerFiles` | List files of a condo owner |
+| GET | `/public-api/v1/condo/owners/{id}` | `getOwner` | Get condo owner details |
+
+## GET /public-api/v1/condo/owners
+
+**List condo owners** — `listOwners`
+
+Returns condo ownership relations (Stockwerkeigentümer) reachable by the token.
+Vacancy contracts are filtered out. Each row carries the derived `status`, the
+unit's `quota` and `hasVotingRight`, the linked `persons`, and the
+`currentContribution` effective today; the full contribution history is on the
+detail endpoint.
+
+Narrow with `filter[status]`, `filter[personId]`, `filter[objectId]`,
+`filter[propertyId]` or `filter[mandateId]`. Use `q` to search by linked person
+name.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name1, name2. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[status]` | query | string: `upcoming` \| `active` \| `terminated` |  | Restricts results to records matching the given status. |
+| `filter[personId]` | query | integer |  | Restricts results to records belonging to the given person id. |
+| `filter[objectId]` | query | integer |  | Restricts results to records belonging to the given object id. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `filter[mandateId]` | query | integer |  | Restricts results to records belonging to the given mandate id. |
+| `sort` | query | string: `id` \| `-id` \| `starts` \| `-starts` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, starts. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name1, name2
+- **Filterable:** `filter[status]` (`upcoming`, `active`, `terminated`), `filter[personId]`, `filter[objectId]`, `filter[propertyId]`, `filter[mandateId]`
+- **Sortable:** `id`, `starts` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [OwnerApiResponse](#ownerapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "objectId": 640,
+      "status": "upcoming",
+      "starts": "2019-07-01",
+      "ends": "2025-01-31",
+      "quota": 85,
+      "hasVotingRight": true,
+      "qrReference": "string",
+      "persons": [
+        {
+          "personId": 123,
+          "roles": [
+            "tenant"
+          ],
+          "isPrimary": true
+        }
+      ],
+      "currentContribution": {
+        "starts": "2026-01-01",
+        "ends": "2025-01-31",
+        "amount": "1200.00",
+        "amountMonthly": "400.00",
+        "billingCycle": 3,
+        "positions": [
+          {
+            "name": "Heizkosten",
+            "settlementMode": "flat",
+            "amount": "80.00"
+          }
+        ]
+      }
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/condo/owners/{id}/files
+
+**List files of a condo owner** — `listOwnerFiles`
+
+Returns the files attached to a condo owner. Visible exactly when the owner is visible via `getOwner`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[category]` | query | string enum (18 values) |  | Restricts results to records matching the given category. One of: `finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `uploadedAt` \| `-uploadedAt` \| `fileSize` \| `-fileSize` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, uploadedAt, fileSize. |
+| `id` | path | integer | yes |  |
+
+**List capabilities**
+
+- **Searchable (`q`):** name
+- **Filterable:** `filter[category]` (`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`)
+- **Sortable:** `id`, `name`, `uploadedAt`, `fileSize` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [FileApiResponse](#fileapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Parent resource not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 4711,
+      "name": "Hausordnung.pdf",
+      "category": "finance",
+      "mimeType": "application/pdf",
+      "fileSize": 184320,
+      "uploadedAt": "2026-03-14T09:12:00+01:00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/condo/owners/{id}
+
+**Get condo owner details** — `getOwner`
+
+Returns a single condo ownership relation by id, including the unit's `quota`
+and `hasVotingRight`, the linked `persons`, the `currentContribution`, and the full
+`contributions` history. Returns 404 when the relation does not exist, is not a
+condo relation, or is outside the token's scope.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+
+**Response** — `200` returns [OwnerDetailApiResponse](#ownerdetailapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Owner not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "contributions": [
+    {
+      "starts": "2026-01-01",
+      "ends": "2025-01-31",
+      "amount": "1200.00",
+      "amountMonthly": "400.00",
+      "billingCycle": 3,
+      "positions": [
+        {
+          "name": "Heizkosten",
+          "settlementMode": "flat",
+          "amount": "80.00"
+        }
+      ]
+    }
+  ],
+  "id": 1,
+  "objectId": 640,
+  "status": "upcoming",
+  "starts": "2019-07-01",
+  "ends": "2025-01-31",
+  "quota": 85,
+  "hasVotingRight": true,
+  "qrReference": "string",
+  "persons": [
+    {
+      "personId": 123,
+      "roles": [
+        "tenant"
+      ],
+      "isPrimary": true
+    }
+  ],
+  "currentContribution": {
+    "starts": "2026-01-01",
+    "ends": "2025-01-31",
+    "amount": "1200.00",
+    "amountMonthly": "400.00",
+    "billingCycle": 3,
+    "positions": [
+      {
+        "name": "Heizkosten",
+        "settlementMode": "flat",
+        "amount": "80.00"
+      }
+    ]
+  }
+}
+```
+
+## Schemas
+
+### OwnerApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `objectId` | integer | yes | FK to the object resource. Resolve via `getObject`. |
+| `status` | [OwnerStatus](#ownerstatus) | yes |  |
+| `starts` | string (date) | yes | Ownership start. |
+| `ends` | string (date) · nullable |  | Ownership end (e.g. on sale); null while ongoing. |
+| `quota` | integer · nullable |  | Wertquota of the unit (ownership share, per-mille); null if not set. |
+| `hasVotingRight` | boolean | yes | Voting right at the owners' assembly. |
+| `qrReference` | string · nullable |  | Swiss QR-bill reference for contribution payments; null if none. |
+| `persons` | [RelatedPersonResponse](#relatedpersonresponse)[] | yes | Persons linked to the ownership relation (owners and residents merged). |
+| `currentContribution` | [ContributionResponse](#contributionresponse) · nullable |  | The contribution version effective today; null if none is effective. |
+
+### OwnerStatus
+
+String enum, 3 values.
+
+`upcoming`, `active`, `terminated`
+
+### RelatedPersonResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `personId` | integer | yes | FK to the person resource. Resolve via `getPerson`. |
+| `roles` | string: `tenant` \| `owner` \| `resident`[] | yes | Roles this person holds on the entry. `tenant`/`owner` = signatory, `resident` = occupant; a person can hold both. `tenant` appears on rent contracts, `owner` on condo owners. |
+| `isPrimary` | boolean | yes | True for the single primary signatory (primary `tenant`/`owner`). Always false for pure residents. |
+
+### ContributionResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `starts` | string (date) | yes | Start of this contribution version. |
+| `ends` | string (date) · nullable |  | End of this contribution version; null for the current version. |
+| `amount` | string | yes | Contribution per billing cycle. Fixed two-decimal string. |
+| `amountMonthly` | string | yes | Derived monthly contribution (`amount / billingCycle`). Fixed two-decimal string. |
+| `billingCycle` | integer: `1` \| `3` \| `6` \| `12` | yes | Months per billing cycle. |
+| `positions` | [AncillaryExpenseResponse](#ancillaryexpenseresponse)[] | yes | Cost breakdown — same semantics as rent ancillary expenses. |
+
+### AncillaryExpenseResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | yes | Position label as configured on the account. |
+| `settlementMode` | [SettlementMode](#settlementmode) | yes |  |
+| `amount` | string · nullable |  | Fixed amount as a two-decimal string for `flat` positions; `null` for `settled` positions (those are collected via the gross/net difference). Sent as a string to preserve precision. |
+
+### SettlementMode
+
+String enum, 2 values.
+
+`flat`, `settled`
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+### FileApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes | Resolve metadata via `getFile` and the binary via `downloadFile`. |
+| `name` | string | yes | File name as uploaded. |
+| `category` | [FileCategory](#filecategory) | yes |  |
+| `mimeType` | string | yes | Stored content type. |
+| `fileSize` | integer | yes | Size in bytes. |
+| `uploadedAt` | string (date-time) | yes | When the file was uploaded, ISO 8601. |
+
+### FileCategory
+
+String enum, 18 values.
+
+`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`
+
+### OwnerDetailApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `contributions` | [ContributionResponse](#contributionresponse)[] | yes | Full contribution version history, ordered by `starts`. |
+| `id` | integer | yes |  |
+| `objectId` | integer | yes | FK to the object resource. Resolve via `getObject`. |
+| `status` | [OwnerStatus](#ownerstatus) | yes |  |
+| `starts` | string (date) | yes | Ownership start. |
+| `ends` | string (date) · nullable |  | Ownership end (e.g. on sale); null while ongoing. |
+| `quota` | integer · nullable |  | Wertquota of the unit (ownership share, per-mille); null if not set. |
+| `hasVotingRight` | boolean | yes | Voting right at the owners' assembly. |
+| `qrReference` | string · nullable |  | Swiss QR-bill reference for contribution payments; null if none. |
+| `persons` | [RelatedPersonResponse](#relatedpersonresponse)[] | yes | Persons linked to the ownership relation (owners and residents merged). |
+| `currentContribution` | [ContributionResponse](#contributionresponse) · nullable |  | The contribution version effective today; null if none is effective. |
+
+# Person
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/persons` | `listPersons` | List persons |
+| GET | `/public-api/v1/persons/{id}/files` | `listPersonFiles` | List files of a person |
+| GET | `/public-api/v1/persons/{id}` | `getPerson` | Get person details |
+
+## GET /public-api/v1/persons
+
+**List persons** — `listPersons`
+
+Returns persons the calling token can reach. An all-mandate token sees every
+person of the customer, including plain contacts with no contract link; a
+mandate-restricted token sees only persons reachable via a contract party or
+resident link within those mandates. Each row carries derived `roles` and the
+current `address`; the address history is available on the detail endpoint.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name1, name2, email, phone. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[role]` | query | string: `tenant` \| `owner` \| `resident` |  | Restricts results to records matching the given role. |
+| `filter[mandateId]` | query | integer |  | Restricts results to records belonging to the given mandate id. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `sort` | query | string: `id` \| `-id` \| `name1` \| `-name1` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name1. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name1, name2, email, phone
+- **Filterable:** `filter[role]` (`tenant`, `owner`, `resident`), `filter[mandateId]`, `filter[propertyId]`
+- **Sortable:** `id`, `name1` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [PersonApiResponse](#personapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "contactType": "natural",
+      "name1": "Muster",
+      "name2": "Hans",
+      "salutation": "unspecified",
+      "email": "string",
+      "phone": "string",
+      "secondEmail": "string",
+      "secondPhone": "string",
+      "website": "string",
+      "communicationChannel": "email",
+      "dateOfBirth": "1980-05-12",
+      "maritalStatus": "married",
+      "placeOfOrigin": "Luzern",
+      "contactPersonName": "string",
+      "secondContactPersonName": "string",
+      "roles": [
+        "tenant"
+      ],
+      "address": {
+        "street": "string",
+        "houseNumber": "string",
+        "postcode": "string",
+        "city": "string",
+        "country": "string"
+      }
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/persons/{id}/files
+
+**List files of a person** — `listPersonFiles`
+
+Returns the files attached to a person. Visible exactly when the person itself is visible via `getPerson`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[category]` | query | string enum (18 values) |  | Restricts results to records matching the given category. One of: `finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `uploadedAt` \| `-uploadedAt` \| `fileSize` \| `-fileSize` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, uploadedAt, fileSize. |
+| `id` | path | integer | yes |  |
+
+**List capabilities**
+
+- **Searchable (`q`):** name
+- **Filterable:** `filter[category]` (`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`)
+- **Sortable:** `id`, `name`, `uploadedAt`, `fileSize` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [FileApiResponse](#fileapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Parent resource not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 4711,
+      "name": "Hausordnung.pdf",
+      "category": "finance",
+      "mimeType": "application/pdf",
+      "fileSize": 184320,
+      "uploadedAt": "2026-03-14T09:12:00+01:00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/persons/{id}
+
+**Get person details** — `getPerson`
+
+Returns a single person by id, including derived `roles`, the current
+`address`, and the full `addresses` history (with scheduled future changes).
+Returns 404 when the person does not exist or is outside the token's scope.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+
+**Response** — `200` returns [PersonDetailApiResponse](#persondetailapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Person not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "addresses": [
+    {
+      "street": "string",
+      "houseNumber": "string",
+      "postcode": "string",
+      "city": "string",
+      "country": "string",
+      "effectiveFrom": "2022-07-01"
+    }
+  ],
+  "id": 1,
+  "contactType": "natural",
+  "name1": "Muster",
+  "name2": "Hans",
+  "salutation": "unspecified",
+  "email": "string",
+  "phone": "string",
+  "secondEmail": "string",
+  "secondPhone": "string",
+  "website": "string",
+  "communicationChannel": "email",
+  "dateOfBirth": "1980-05-12",
+  "maritalStatus": "married",
+  "placeOfOrigin": "Luzern",
+  "contactPersonName": "string",
+  "secondContactPersonName": "string",
+  "roles": [
+    "tenant"
+  ],
+  "address": {
+    "street": "string",
+    "houseNumber": "string",
+    "postcode": "string",
+    "city": "string",
+    "country": "string"
+  }
+}
+```
+
+## Schemas
+
+### PersonApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `contactType` | [ContactType](#contacttype) | yes |  |
+| `name1` | string | yes | Family name (natural) or company name (legal). |
+| `name2` | string · nullable |  | Given name(s) (natural) or name addition (legal). Null when not applicable. |
+| `salutation` | [Salutation](#salutation) | yes |  |
+| `email` | string · nullable |  |  |
+| `phone` | string · nullable |  |  |
+| `secondEmail` | string · nullable |  |  |
+| `secondPhone` | string · nullable |  |  |
+| `website` | string · nullable |  |  |
+| `communicationChannel` | [CommunicationChannel](#communicationchannel) | yes |  |
+| `dateOfBirth` | string (date) · nullable |  | Date of birth (natural persons only). Null otherwise. |
+| `maritalStatus` | [MaritalStatus](#maritalstatus) · nullable |  | Marital status (natural persons only). Values: `married`, `single`, `divorced`, `widowed`. Null otherwise. |
+| `placeOfOrigin` | string · nullable |  | Swiss place of origin / Heimatort (natural persons only). Null otherwise. |
+| `contactPersonName` | string · nullable |  | Contact person (legal persons only). Null otherwise. |
+| `secondContactPersonName` | string · nullable |  | Second contact person (legal persons only). Null otherwise. |
+| `roles` | string: `tenant` \| `owner` \| `resident`[] | yes | Roles derived from the person's active contract relations. Empty when the person has no active tenancy, ownership, or residency. |
+| `address` | [AddressDto](#addressdto) · nullable |  | Current effective address, or null when the person has no address on record. |
+
+### ContactType
+
+String enum, 2 values.
+
+`natural`, `legal`
+
+### Salutation
+
+String enum, 3 values.
+
+`unspecified`, `mrs`, `mr`
+
+### CommunicationChannel
+
+String enum, 2 values.
+
+`email`, `letter`
+
+### MaritalStatus
+
+String enum, 4 values.
+
+`married`, `single`, `divorced`, `widowed`
+
+### AddressDto
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `street` | string | yes |  |
+| `houseNumber` | string | yes |  |
+| `postcode` | string | yes |  |
+| `city` | string | yes |  |
+| `country` | string | yes |  |
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+### FileApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes | Resolve metadata via `getFile` and the binary via `downloadFile`. |
+| `name` | string | yes | File name as uploaded. |
+| `category` | [FileCategory](#filecategory) | yes |  |
+| `mimeType` | string | yes | Stored content type. |
+| `fileSize` | integer | yes | Size in bytes. |
+| `uploadedAt` | string (date-time) | yes | When the file was uploaded, ISO 8601. |
+
+### FileCategory
+
+String enum, 18 values.
+
+`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`
+
+### PersonDetailApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `addresses` | [PersonAddressDto](#personaddressdto)[] | yes | Full address history, oldest first; the baseline address (no `effectiveFrom`) leads. Includes scheduled future address changes. |
+| `id` | integer | yes |  |
+| `contactType` | [ContactType](#contacttype) | yes |  |
+| `name1` | string | yes | Family name (natural) or company name (legal). |
+| `name2` | string · nullable |  | Given name(s) (natural) or name addition (legal). Null when not applicable. |
+| `salutation` | [Salutation](#salutation) | yes |  |
+| `email` | string · nullable |  |  |
+| `phone` | string · nullable |  |  |
+| `secondEmail` | string · nullable |  |  |
+| `secondPhone` | string · nullable |  |  |
+| `website` | string · nullable |  |  |
+| `communicationChannel` | [CommunicationChannel](#communicationchannel) | yes |  |
+| `dateOfBirth` | string (date) · nullable |  | Date of birth (natural persons only). Null otherwise. |
+| `maritalStatus` | [MaritalStatus](#maritalstatus) · nullable |  | Marital status (natural persons only). Values: `married`, `single`, `divorced`, `widowed`. Null otherwise. |
+| `placeOfOrigin` | string · nullable |  | Swiss place of origin / Heimatort (natural persons only). Null otherwise. |
+| `contactPersonName` | string · nullable |  | Contact person (legal persons only). Null otherwise. |
+| `secondContactPersonName` | string · nullable |  | Second contact person (legal persons only). Null otherwise. |
+| `roles` | string: `tenant` \| `owner` \| `resident`[] | yes | Roles derived from the person's active contract relations. Empty when the person has no active tenancy, ownership, or residency. |
+| `address` | [AddressDto](#addressdto) · nullable |  | Current effective address, or null when the person has no address on record. |
+
+### PersonAddressDto
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `street` | string | yes |  |
+| `houseNumber` | string | yes |  |
+| `postcode` | string | yes |  |
+| `city` | string | yes |  |
+| `country` | string | yes |  |
+| `effectiveFrom` | string (date) · nullable |  | Day this address became effective. Null for the baseline address with no recorded start. |
+
+# Property
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/{mode}/properties` | `listProperties` | List properties |
+| GET | `/public-api/v1/{mode}/properties/{id}/files` | `listPropertyFiles` | List files of a property |
+| GET | `/public-api/v1/{mode}/properties/{id}` | `getProperty` | Get property details |
+
+## GET /public-api/v1/{mode}/properties
+
+**List properties** — `listProperties`
+
+Returns properties under reachable mandates for the selected `{mode}`.
+
+Properties sit one level below mandates in the resource hierarchy (`Mandate → Property → Building → Object`). Each property carries a `mandateId` FK that resolves via `getMandate`.
+
+Scope with `filter[mandateId]` to restrict to a single mandate. Use `q` for free-text search across name, ZIP and city.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name, postcode, city. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[mandateId]` | query | integer |  | Restricts results to records belonging to the given mandate id. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `city` \| `-city` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, city. |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name, postcode, city
+- **Filterable:** `filter[mandateId]`
+- **Sortable:** `id`, `name`, `city` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [PropertyApiResponse](#propertyapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "mandateId": 1,
+      "managerId": 42,
+      "name": "string",
+      "postcode": "string",
+      "city": "string",
+      "canton": "ZH",
+      "country": "AF",
+      "egrid": "CH123456789012",
+      "isActive": true
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/properties/{id}/files
+
+**List files of a property** — `listPropertyFiles`
+
+Returns the files attached to a property. Visible exactly when the property itself is
+visible via `getProperty`; orphaned files and files of other customers never appear.
+
+Use `getFile` for a file's owners and `downloadFile` for its binary.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[category]` | query | string enum (18 values) |  | Restricts results to records matching the given category. One of: `finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `uploadedAt` \| `-uploadedAt` \| `fileSize` \| `-fileSize` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, uploadedAt, fileSize. |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name
+- **Filterable:** `filter[category]` (`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`)
+- **Sortable:** `id`, `name`, `uploadedAt`, `fileSize` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [FileApiResponse](#fileapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Parent resource not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 4711,
+      "name": "Hausordnung.pdf",
+      "category": "finance",
+      "mimeType": "application/pdf",
+      "fileSize": 184320,
+      "uploadedAt": "2026-03-14T09:12:00+01:00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/properties/{id}
+
+**Get property details** — `getProperty`
+
+Returns a single property by id, including its address, canton, EGRID, and active flag.
+
+Use `listProperties` for discovery when the id is unknown. The `mandateId` FK links back to `getMandate`; `getBuilding` / `listBuildings` traverse down to buildings under this property.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**Response** — `200` returns [PropertyApiResponse](#propertyapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Property not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "mandateId": 1,
+  "managerId": 42,
+  "name": "string",
+  "postcode": "string",
+  "city": "string",
+  "canton": "ZH",
+  "country": "AF",
+  "egrid": "CH123456789012",
+  "isActive": true
+}
+```
+
+## Schemas
+
+### PropertyApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `mandateId` | integer | yes | FK to the parent mandate. Resolve via `getMandate`. |
+| `managerId` | integer | yes | Id of the user managing this property inside Fairwalter. Not resolvable via the Public API — exposed for cross-referencing with other systems. |
+| `name` | string | yes |  |
+| `postcode` | string | yes |  |
+| `city` | string | yes |  |
+| `canton` | string · nullable |  | Swiss canton abbreviation (two letters, e.g. "ZH", "BE"). Null when the property is outside Switzerland or the canton is unknown. |
+| `country` | [Country](#country) | yes |  |
+| `egrid` | string · nullable |  | Swiss federal property identifier (EGRID), 14-character alphanumeric code assigned by the Federal Office of Topography. Null when no EGRID is on record. |
+| `isActive` | boolean | yes | Whether the property is currently active. Inactive properties are retained for historical reporting but no new contracts are signed against them. |
+
+### Country
+
+String enum, 249 values.
+
+`AF`, `AX`, `AL`, `DZ`, `AS`, `AD`, `AO`, `AI`, `AQ`, `AG`, `AR`, `AM`, `AW`, `AU`, `AT`, `AZ`, `BS`, `BH`, `BD`, `BB`, `BY`, `BE`, `BZ`, `BJ`, `BM`, `BT`, `BO`, `BQ`, `BA`, `BW`, `BV`, `BR`, `IO`, `BN`, `BG`, `BF`, `BI`, `KH`, `CM`, `CA`, `CV`, `KY`, `CF`, `TD`, `CL`, `CN`, `CX`, `CC`, `CO`, `KM`, `CG`, `CD`, `CK`, `CR`, `CI`, `HR`, `CU`, `CW`, `CY`, `CZ`, `DK`, `DJ`, `DM`, `DO`, `EC`, `EG`, `SV`, `GQ`, `ER`, `EE`, `ET`, `FK`, `FO`, `FJ`, `FI`, `FR`, `GF`, `PF`, `TF`, `GA`, `GM`, `GE`, `DE`, `GH`, `GI`, `GR`, `GL`, `GD`, `GP`, `GU`, `GT`, `GG`, `GN`, `GW`, `GY`, `HT`, `HM`, `VA`, `HN`, `HK`, `HU`, `IS`, `IN`, `ID`, `IR`, `IQ`, `IE`, `IM`, `IL`, `IT`, `JM`, `JP`, `JE`, `JO`, `KZ`, `KE`, `KI`, `KP`, `KR`, `XK`, `KW`, `KG`, `LA`, `LV`, `LB`, `LS`, `LR`, `LY`, `LI`, `LT`, `LU`, `MO`, `MK`, `MG`, `MW`, `MY`, `MV`, `ML`, `MT`, `MH`, `MQ`, `MR`, `MU`, `YT`, `MX`, `FM`, `MD`, `MC`, `MN`, `ME`, `MS`, `MA`, `MZ`, `MM`, `NA`, `NR`, `NP`, `NL`, `NC`, `NZ`, `NI`, `NE`, `NG`, `NU`, `NF`, `MP`, `NO`, `OM`, `PK`, `PW`, `PS`, `PA`, `PG`, `PY`, `PE`, `PH`, `PN`, `PL`, `PT`, `PR`, `QA`, `RE`, `RO`, `RU`, `RW`, `BL`, `SH`, `KN`, `LC`, `MF`, `PM`, `VC`, `WS`, `SM`, `ST`, `SA`, `SN`, `RS`, `SC`, `SL`, `SG`, `SX`, `SK`, `SI`, `SB`, `SO`, `ZA`, `GS`, `SS`, `ES`, `LK`, `SD`, `SR`, `SZ`, `SE`, `CH`, `SY`, `TW`, `TJ`, `TZ`, `TH`, `TL`, `TG`, `TK`, `TO`, `TT`, `TN`, `TR`, `TM`, `TC`, `TV`, `UG`, `UA`, `AE`, `GB`, `US`, `UM`, `UY`, `UZ`, `VU`, `VE`, `VN`, `VG`, `VI`, `WF`, `EH`, `YE`, `ZM`, `ZW`
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+### FileApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes | Resolve metadata via `getFile` and the binary via `downloadFile`. |
+| `name` | string | yes | File name as uploaded. |
+| `category` | [FileCategory](#filecategory) | yes |  |
+| `mimeType` | string | yes | Stored content type. |
+| `fileSize` | integer | yes | Size in bytes. |
+| `uploadedAt` | string (date-time) | yes | When the file was uploaded, ISO 8601. |
+
+### FileCategory
+
+String enum, 18 values.
+
+`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`
+
+# Room
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/{mode}/rooms` | `listRooms` | List rooms |
+| GET | `/public-api/v1/{mode}/rooms/{id}` | `getRoom` | Get room details |
+
+## GET /public-api/v1/{mode}/rooms
+
+**List rooms** — `listRooms`
+
+Returns the rooms of rental objects reachable for the selected `{mode}`. Each room
+carries an `objectId` FK that resolves via `getObject`.
+
+Scope with `filter[objectId]`, `filter[buildingId]`, or `filter[propertyId]`; use `q`
+to search by room name.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[objectId]` | query | integer |  | Restricts results to records belonging to the given object id. |
+| `filter[buildingId]` | query | integer |  | Restricts results to records belonging to the given building id. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name. |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name
+- **Filterable:** `filter[objectId]`, `filter[buildingId]`, `filter[propertyId]`
+- **Sortable:** `id`, `name` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [RoomApiResponse](#roomapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "objectId": 789,
+      "name": "Küche",
+      "category": "Küche",
+      "area": "12.5"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/{mode}/rooms/{id}
+
+**Get room details** — `getRoom`
+
+Returns a single room by id, including its template `category` and `area`.
+
+Use `listRooms` for discovery when the id is unknown. The `objectId` FK links back to `getObject`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+| `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
+
+**Response** — `200` returns [RoomApiResponse](#roomapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Room not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "objectId": 789,
+  "name": "Küche",
+  "category": "Küche",
+  "area": "12.5"
+}
+```
+
+## Schemas
+
+### RoomApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `objectId` | integer | yes | FK to the rental object this room belongs to. Resolve via `getObject`. |
+| `name` | string | yes | Room name, e.g. "Küche" or "Schlafzimmer 1". |
+| `category` | string · nullable |  | Room template name (customer/system-defined), e.g. "Badezimmer". Null when the room is not based on a template. |
+| `area` | string · nullable |  | Floor area in m² as a decimal string. Trailing zeros are trimmed. Sent as a string — never a float — to preserve precision. Null when not recorded. |
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+# Service Provider
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/service-providers` | `listServiceProviders` | List service providers |
+| GET | `/public-api/v1/service-providers/{id}` | `getServiceProvider` | Get service provider details |
+
+## GET /public-api/v1/service-providers
+
+**List service providers** — `listServiceProviders`
+
+Returns the service providers (contractors) the calling token can reach. An
+all-mandate token sees every provider of the customer, including ones with no
+property assignment; a mandate-restricted token sees only providers assigned to
+a property within those mandates. Filter with `filter[propertyId]` or
+`filter[domain]`; search across name and email with `q`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name1, name2, email. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
+| `filter[domain]` | query | string |  | Restricts results to records matching the given domain. |
+| `sort` | query | string: `id` \| `-id` \| `name1` \| `-name1` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name1. |
+
+**List capabilities**
+
+- **Searchable (`q`):** name1, name2, email
+- **Filterable:** `filter[propertyId]`, `filter[domain]`
+- **Sortable:** `id`, `name1` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [ServiceProviderApiResponse](#serviceproviderapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "contactType": "natural",
+      "name1": "Muster Haustechnik AG",
+      "name2": "string",
+      "salutation": "unspecified",
+      "email": "string",
+      "phone": "string",
+      "secondEmail": "string",
+      "secondPhone": "string",
+      "website": "string",
+      "contactPersonName": "string",
+      "secondContactPersonName": "string",
+      "domains": [
+        "Sanitär",
+        "Heizung"
+      ],
+      "propertyIds": [
+        7,
+        9
+      ],
+      "address": {
+        "street": "string",
+        "houseNumber": "string",
+        "postcode": "string",
+        "city": "string",
+        "country": "string"
+      }
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/service-providers/{id}
+
+**Get service provider details** — `getServiceProvider`
+
+Returns a single service provider by id, including the trades it covers
+(`domains`), the `propertyIds` it is assigned to, and its postal address.
+Returns 404 when the provider does not exist or is outside the token's scope.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+
+**Response** — `200` returns [ServiceProviderApiResponse](#serviceproviderapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Service provider not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "contactType": "natural",
+  "name1": "Muster Haustechnik AG",
+  "name2": "string",
+  "salutation": "unspecified",
+  "email": "string",
+  "phone": "string",
+  "secondEmail": "string",
+  "secondPhone": "string",
+  "website": "string",
+  "contactPersonName": "string",
+  "secondContactPersonName": "string",
+  "domains": [
+    "Sanitär",
+    "Heizung"
+  ],
+  "propertyIds": [
+    7,
+    9
+  ],
+  "address": {
+    "street": "string",
+    "houseNumber": "string",
+    "postcode": "string",
+    "city": "string",
+    "country": "string"
+  }
+}
+```
+
+## Schemas
+
+### ServiceProviderApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `contactType` | [ContactType](#contacttype) | yes |  |
+| `name1` | string | yes | Family name (natural) or company name (legal). |
+| `name2` | string · nullable |  | Given name(s) (natural) or name addition (legal). Null when not applicable. |
+| `salutation` | [Salutation](#salutation) | yes |  |
+| `email` | string · nullable |  |  |
+| `phone` | string · nullable |  |  |
+| `secondEmail` | string · nullable |  |  |
+| `secondPhone` | string · nullable |  |  |
+| `website` | string · nullable |  |  |
+| `contactPersonName` | string · nullable |  | Primary contact person at the provider. Null when none on record. |
+| `secondContactPersonName` | string · nullable |  | Second contact person at the provider. Null when none on record. |
+| `domains` | string[] | yes | Trades the provider covers, as customer-defined free-text labels. |
+| `propertyIds` | integer[] | yes | Ids of the properties this provider is assigned to. Resolve via `getProperty`. |
+| `address` | [AddressDto](#addressdto) | yes |  |
+
+### ContactType
+
+String enum, 2 values.
+
+`natural`, `legal`
+
+### Salutation
+
+String enum, 3 values.
+
+`unspecified`, `mrs`, `mr`
+
+### AddressDto
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `street` | string | yes |  |
+| `houseNumber` | string | yes |  |
+| `postcode` | string | yes |  |
+| `city` | string | yes |  |
+| `country` | string | yes |  |
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+# User
+
+| Method | Path | Operation | Summary |
+| --- | --- | --- | --- |
+| GET | `/public-api/v1/users` | `listUsers` | List users |
+| GET | `/public-api/v1/users/{id}/files` | `listUserFiles` | List files of a user |
+| GET | `/public-api/v1/users/{id}` | `getUser` | Get user details |
+
+## GET /public-api/v1/users
+
+**List users** — `listUsers`
+
+Returns the property-management staff accounts the calling token can reach.
+
+Users are referenced by `managerId` on properties. A token with access to all mandates sees every (non-support) user of the customer; a token restricted to specific mandates sees only users assigned to an in-scope mandate, plus managers of in-scope properties.
+
+Use `q` for free-text search across first name, last name, and email. Narrow with `filter[status]`, `filter[mandateId]`, or `filter[role]`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `filter[status]` | query | string: `invited` \| `active` \| `disabled` |  | Restricts results to users with the given lifecycle status. |
+| `filter[mandateId]` | query | integer |  | Restricts results to users assigned to the given mandate id. |
+| `filter[role]` | query | string: `account_owner` \| `manager` |  | Restricts results by system role. `manager` matches every user; `account_owner` matches account owners only. |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: firstName, lastName, email. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `sort` | query | string: `id` \| `-id` \| `lastName` \| `-lastName` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, lastName. |
+
+**List capabilities**
+
+- **Searchable (`q`):** firstName, lastName, email
+- **Filterable:** `filter[status]` (`invited`, `active`, `disabled`), `filter[mandateId]`, `filter[role]` (`account_owner`, `manager`)
+- **Sortable:** `id`, `lastName` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [UserApiResponse](#userapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "salutation": "unspecified",
+      "firstName": "string",
+      "lastName": "string",
+      "email": "string",
+      "phone": "+41 79 555 11 22",
+      "jobTitle": "string",
+      "language": "de",
+      "status": "invited",
+      "roles": [
+        "manager"
+      ],
+      "mandateIds": [
+        1
+      ]
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/users/{id}/files
+
+**List files of a user** — `listUserFiles`
+
+Returns the files attached to a user. The only `category` a user file can have is
+`profile_image`. Visible exactly when the user itself is visible via `getUser`.
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `limit` | query | integer |  | Maximum number of items to return. limit=0 is accepted and silently treated as 1. Values above the maximum are capped to it. Default `30`. Maximum `100`. |
+| `offset` | query | integer |  | Number of items to skip. Use with limit for pagination. Default `0`. |
+| `q` | query | string |  | Free-text search across: name. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
+| `filter[category]` | query | string enum (18 values) |  | Restricts results to records matching the given category. One of: `finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`. |
+| `sort` | query | string: `id` \| `-id` \| `name` \| `-name` \| `uploadedAt` \| `-uploadedAt` \| `fileSize` \| `-fileSize` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name, uploadedAt, fileSize. |
+| `id` | path | integer | yes |  |
+
+**List capabilities**
+
+- **Searchable (`q`):** name
+- **Filterable:** `filter[category]` (`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`)
+- **Sortable:** `id`, `name`, `uploadedAt`, `fileSize` (prefix `-` for descending)
+- **Page size:** default `30`, maximum `100`
+
+**Response** — `200` returns a list envelope around [FileApiResponse](#fileapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `400` | Invalid query parameters |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | Parent resource not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "data": [
+    {
+      "id": 4711,
+      "name": "Hausordnung.pdf",
+      "category": "finance",
+      "mimeType": "application/pdf",
+      "fileSize": 184320,
+      "uploadedAt": "2026-03-14T09:12:00+01:00"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "limit": 30,
+      "offset": 0,
+      "total": 1,
+      "hasMore": false
+    }
+  }
+}
+```
+
+## GET /public-api/v1/users/{id}
+
+**Get user details** — `getUser`
+
+Returns a single user by id, including salutation, contact details, preferred language, lifecycle status, system roles, and assigned mandate ids.
+
+Use `listUsers` for discovery when the id is unknown. A `managerId` reference on a property resolves here. With a restricted token a referenced user can fall outside the visible set; consumers must tolerate an unresolvable reference (`404`).
+
+| Parameter | In | Type | Required | Description |
+| --- | --- | --- | --- | --- |
+| `id` | path | integer | yes |  |
+
+**Response** — `200` returns [UserApiResponse](#userapiresponse).
+
+| Status | Description |
+| --- | --- |
+| `200` | OK |
+| `401` | Missing or invalid token |
+| `403` | Token cannot access this resource |
+| `404` | User not found |
+| `429` | Rate limit exceeded |
+
+**Example response**
+
+```json
+{
+  "id": 1,
+  "salutation": "unspecified",
+  "firstName": "string",
+  "lastName": "string",
+  "email": "string",
+  "phone": "+41 79 555 11 22",
+  "jobTitle": "string",
+  "language": "de",
+  "status": "invited",
+  "roles": [
+    "manager"
+  ],
+  "mandateIds": [
+    1
+  ]
+}
+```
+
+## Schemas
+
+### UserApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes |  |
+| `salutation` | [Salutation](#salutation) | yes |  |
+| `firstName` | string | yes |  |
+| `lastName` | string | yes |  |
+| `email` | string | yes |  |
+| `phone` | string · nullable |  | Mobile phone number. Null when not set. |
+| `jobTitle` | string · nullable |  |  |
+| `language` | [UserLanguage](#userlanguage) | yes |  |
+| `status` | [UserStatus](#userstatus) | yes |  |
+| `roles` | string: `manager` \| `account_owner`[] | yes | System roles. Every user is `manager`; account owners additionally hold `account_owner`. |
+| `mandateIds` | integer[] | yes | Ids of the mandates this user is assigned to. |
+
+### Salutation
+
+String enum, 3 values.
+
+`unspecified`, `mrs`, `mr`
+
+### UserLanguage
+
+String enum, 4 values.
+
+`de`, `en`, `fr`, `it`
+
+### UserStatus
+
+String enum, 3 values.
+
+`invited`, `active`, `disabled`
+
+### PaginationMeta
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | integer | yes |  |
+| `offset` | integer | yes |  |
+| `total` | integer | yes |  |
+| `hasMore` | boolean | yes |  |
+
+### FileApiResponse
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | integer | yes | Resolve metadata via `getFile` and the binary via `downloadFile`. |
+| `name` | string | yes | File name as uploaded. |
+| `category` | [FileCategory](#filecategory) | yes |  |
+| `mimeType` | string | yes | Stored content type. |
+| `fileSize` | integer | yes | Size in bytes. |
+| `uploadedAt` | string (date-time) | yes | When the file was uploaded, ISO 8601. |
+
+### FileCategory
+
+String enum, 18 values.
+
+`finance`, `contracts`, `correspondence`, `protocol`, `personal_information`, `state_documents`, `repairs_and_damage`, `pictures`, `various`, `rules_and_regulations`, `locking_schedule`, `plan`, `service_contracts`, `insurance`, `offer`, `condominium_protocol`, `condominium_meeting`, `profile_image`

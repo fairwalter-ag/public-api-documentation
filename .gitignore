@@ -1,0 +1,4 @@
+__pycache__/
+
+# Internal design documents live here but are never published.
+public-api-docs-github-publishing.md
