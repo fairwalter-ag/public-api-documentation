@@ -3530,7 +3530,7 @@
                     {
                         "name": "sort",
                         "in": "query",
-                        "description": "Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name1.",
+                        "description": "Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name1, sortName.",
                         "schema": {
                             "type": "string",
                             "example": "id",
@@ -3538,7 +3538,9 @@
                                 "id",
                                 "-id",
                                 "name1",
-                                "-name1"
+                                "-name1",
+                                "sortName",
+                                "-sortName"
                             ]
                         }
                     }

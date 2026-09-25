@@ -3259,13 +3259,13 @@ current `address`; the address history is available on the detail endpoint.
 | `filter[role]` | query | string: `tenant` \| `owner` \| `resident` |  | Restricts results to records matching the given role. |
 | `filter[mandateId]` | query | integer |  | Restricts results to records belonging to the given mandate id. |
 | `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
-| `sort` | query | string: `id` \| `-id` \| `name1` \| `-name1` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name1. |
+| `sort` | query | string: `id` \| `-id` \| `name1` \| `-name1` \| `sortName` \| `-sortName` |  | Sort field. Prefix with `-` for descending order (e.g. `-id`). Allowed: id, name1, sortName. |
 
 **List capabilities**
 
 - **Searchable (`q`):** name1, name2, email, phone
 - **Filterable:** `filter[role]` (`tenant`, `owner`, `resident`), `filter[mandateId]`, `filter[propertyId]`
-- **Sortable:** `id`, `name1` (prefix `-` for descending)
+- **Sortable:** `id`, `name1`, `sortName` (prefix `-` for descending)
 - **Page size:** default `30`, maximum `100`
 
 **Response** — `200` returns a list envelope around [PersonApiResponse](#personapiresponse).
