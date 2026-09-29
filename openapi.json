@@ -1806,7 +1806,8 @@
                                 "rent",
                                 "ancillary_expense",
                                 "final_account",
-                                "manual"
+                                "manual",
+                                "budget"
                             ]
                         }
                     },
@@ -7309,7 +7310,8 @@
                     "rent",
                     "ancillary_expense",
                     "final_account",
-                    "manual"
+                    "manual",
+                    "budget"
                 ]
             },
             "DebitorInvoiceStatus": {
