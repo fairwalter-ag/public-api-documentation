@@ -171,7 +171,7 @@ Prefer `hasMore` over `ceil(total/limit)` for the loop condition — `total` ref
 
 ## Rate limits
 
-Requests are limited to **600 per minute per token**, measured over a sliding window. Every response carries the current state:
+Requests are limited to **1200 per minute per token**, measured over a sliding window. Every response carries the current state:
 
 | Header                  | Meaning                                             |
 |-------------------------|-----------------------------------------------------|
