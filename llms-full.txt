@@ -85,7 +85,7 @@ FiscalYear ──< OpeningBalance >── Account
 - **FiscalYear** — either property-scoped (`type: accounting`, `propertyId` set) or a mandate-level rollup (`type: consolidation`, `mandateId` set). Exactly one of the two ids is non-null; the other is `null`.
 - **Account** — one entry of the chart of accounts for the `{mode}` chart, with `number`, `label` and `category`.
 - **OpeningBalance** — an account's balance carried into a fiscal year (`fiscalYearId`, `accountId`, `propertyId`).
-- **Booking** — one journal entry (`debitAccountId`, `creditAccountId`, `propertyId`, optional `objectId`).
+- **Booking** — one journal entry (`debitAccountId`, `creditAccountId`, `propertyId`).
 - **DebitorInvoice** — an outgoing invoice (`contractId`, `objectId`, `propertyId`, `mandateId`), the document behind most rent bookings.
 
 **Operations and access:**
@@ -739,7 +739,6 @@ This endpoint allows a larger page size (up to 500) for full-year exports.
       "creditAccountId": 12,
       "creditAccountNumber": 3000,
       "propertyId": 7,
-      "objectId": 789,
       "date": "2025-03-01",
       "label": "Mietzins März 2025, Bahnhofstrasse 1, 2.OG",
       "reference": "RE-2025-0341",
@@ -790,7 +789,6 @@ the token's scope, or does not belong to the selected `{mode}`.
   "creditAccountId": 12,
   "creditAccountNumber": 3000,
   "propertyId": 7,
-  "objectId": 789,
   "date": "2025-03-01",
   "label": "Mietzins März 2025, Bahnhofstrasse 1, 2.OG",
   "reference": "RE-2025-0341",
@@ -811,7 +809,6 @@ the token's scope, or does not belong to the selected `{mode}`.
 | `creditAccountId` | integer | yes | FK to the credit account (Haben). Resolve via `getAccount`. |
 | `creditAccountNumber` | integer | yes | Account number of the credit account. See `debitAccountNumber`. |
 | `propertyId` | integer | yes | FK to the property. Resolve via `getProperty`. |
-| `objectId` | integer · nullable |  | FK to the object when the booking is attributable to a single object; otherwise null. |
 | `date` | string (date) | yes |  |
 | `label` | string | yes | Booking text. |
 | `reference` | string · nullable |  | Free-text reference (e.g. invoice number); null when none. |
@@ -2042,9 +2039,9 @@ String enum, 4 values.
 
 ### InvoicePositionType
 
-String enum, 9 values.
+String enum, 14 values.
 
-`normal`, `vat`, `rent_net`, `rent_ancillary_expenses_actual`, `rent_ancillary_expenses_flat`, `ae_floating_reduction`, `ae_costs`, `administration_fee`, `rounding`
+`normal`, `vat`, `rent_net`, `rent_ancillary_expenses_actual`, `rent_ancillary_expenses_flat`, `ae_floating_reduction`, `ae_costs`, `administration_fee`, `rounding`, `budget_cost_share`, `budget_revenue_share`, `budget_fund_deposit`, `budget_previous_balance`, `budget_advance_charge`
 
 ### DebitorInvoicePaymentResponse
 

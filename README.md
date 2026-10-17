@@ -85,7 +85,7 @@ FiscalYear ──< OpeningBalance >── Account
 - **FiscalYear** — either property-scoped (`type: accounting`, `propertyId` set) or a mandate-level rollup (`type: consolidation`, `mandateId` set). Exactly one of the two ids is non-null; the other is `null`.
 - **Account** — one entry of the chart of accounts for the `{mode}` chart, with `number`, `label` and `category`.
 - **OpeningBalance** — an account's balance carried into a fiscal year (`fiscalYearId`, `accountId`, `propertyId`).
-- **Booking** — one journal entry (`debitAccountId`, `creditAccountId`, `propertyId`, optional `objectId`).
+- **Booking** — one journal entry (`debitAccountId`, `creditAccountId`, `propertyId`).
 - **DebitorInvoice** — an outgoing invoice (`contractId`, `objectId`, `propertyId`, `mandateId`), the document behind most rent bookings.
 
 **Operations and access:**

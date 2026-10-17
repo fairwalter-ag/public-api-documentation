@@ -61,7 +61,6 @@ This endpoint allows a larger page size (up to 500) for full-year exports.
       "creditAccountId": 12,
       "creditAccountNumber": 3000,
       "propertyId": 7,
-      "objectId": 789,
       "date": "2025-03-01",
       "label": "Mietzins März 2025, Bahnhofstrasse 1, 2.OG",
       "reference": "RE-2025-0341",
@@ -112,7 +111,6 @@ the token's scope, or does not belong to the selected `{mode}`.
   "creditAccountId": 12,
   "creditAccountNumber": 3000,
   "propertyId": 7,
-  "objectId": 789,
   "date": "2025-03-01",
   "label": "Mietzins März 2025, Bahnhofstrasse 1, 2.OG",
   "reference": "RE-2025-0341",
@@ -133,7 +131,6 @@ the token's scope, or does not belong to the selected `{mode}`.
 | `creditAccountId` | integer | yes | FK to the credit account (Haben). Resolve via `getAccount`. |
 | `creditAccountNumber` | integer | yes | Account number of the credit account. See `debitAccountNumber`. |
 | `propertyId` | integer | yes | FK to the property. Resolve via `getProperty`. |
-| `objectId` | integer · nullable |  | FK to the object when the booking is attributable to a single object; otherwise null. |
 | `date` | string (date) | yes |  |
 | `label` | string | yes | Booking text. |
 | `reference` | string · nullable |  | Free-text reference (e.g. invoice number); null when none. |

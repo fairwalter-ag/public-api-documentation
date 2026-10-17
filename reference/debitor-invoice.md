@@ -267,9 +267,9 @@ String enum, 4 values.
 
 ### InvoicePositionType
 
-String enum, 9 values.
+String enum, 14 values.
 
-`normal`, `vat`, `rent_net`, `rent_ancillary_expenses_actual`, `rent_ancillary_expenses_flat`, `ae_floating_reduction`, `ae_costs`, `administration_fee`, `rounding`
+`normal`, `vat`, `rent_net`, `rent_ancillary_expenses_actual`, `rent_ancillary_expenses_flat`, `ae_floating_reduction`, `ae_costs`, `administration_fee`, `rounding`, `budget_cost_share`, `budget_revenue_share`, `budget_fund_deposit`, `budget_previous_balance`, `budget_advance_charge`
 
 ### DebitorInvoicePaymentResponse
 
