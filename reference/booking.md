@@ -28,14 +28,14 @@ This endpoint allows a larger page size (up to 500) for full-year exports.
 | `filter[dateTo]` | query | string (date) |  | Upper (inclusive) bound: only records whose date is on or before this value. |
 | `filter[accountId]` | query | integer |  | Restricts results to records belonging to the given account id. |
 | `filter[propertyId]` | query | integer |  | Restricts results to records belonging to the given property id. |
-| `filter[type]` | query | string: `debitor_invoice` \| `creditor_invoice` \| `ancillary_expense` \| `vacancy` \| `reimbursement_invoice` \| `manual` \| `closing_entry` |  | Restricts results to records matching the given type. |
+| `filter[type]` | query | string: `debitor_invoice` \| `creditor_invoice` \| `ancillary_expense` \| `vacancy` \| `reimbursement_invoice` \| `opening_takeover` \| `manual` \| `closing_entry` |  | Restricts results to records matching the given type. |
 | `sort` | query | string: `date` \| `-date` \| `id` \| `-id` |  | Sort field. Prefix with `-` for descending order (e.g. `-date`). Allowed: date, id. |
 | `mode` | path | string: `rent` \| `condo` | yes | Business domain for the request. Use `rent` for rental-management data, `condo` for condominium-ownership data. The selected mode constrains every related resource. |
 
 **List capabilities**
 
 - **Searchable (`q`):** label, reference
-- **Filterable:** `filter[fiscalYearId]`, `filter[dateFrom]`, `filter[dateTo]`, `filter[accountId]`, `filter[propertyId]`, `filter[type]` (`debitor_invoice`, `creditor_invoice`, `ancillary_expense`, `vacancy`, `reimbursement_invoice`, `manual`, `closing_entry`)
+- **Filterable:** `filter[fiscalYearId]`, `filter[dateFrom]`, `filter[dateTo]`, `filter[accountId]`, `filter[propertyId]`, `filter[type]` (`debitor_invoice`, `creditor_invoice`, `ancillary_expense`, `vacancy`, `reimbursement_invoice`, `opening_takeover`, `manual`, `closing_entry`)
 - **Sortable:** `date`, `id` (prefix `-` for descending)
 - **Page size:** default `30`, maximum `500`
 
@@ -139,9 +139,9 @@ the token's scope, or does not belong to the selected `{mode}`.
 
 ### BookingType
 
-String enum, 7 values.
+String enum, 8 values.
 
-`debitor_invoice`, `creditor_invoice`, `ancillary_expense`, `vacancy`, `reimbursement_invoice`, `manual`, `closing_entry`
+`debitor_invoice`, `creditor_invoice`, `ancillary_expense`, `vacancy`, `reimbursement_invoice`, `opening_takeover`, `manual`, `closing_entry`
 
 ### PaginationMeta
 

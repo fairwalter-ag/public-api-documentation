@@ -29,7 +29,7 @@ Use `q` to search by invoice number or label.
 | `q` | query | string |  | Free-text search across: reference, label. Case-insensitive partial match; every word must match one of these fields (so "Peter Berger" matches first and last name in separate fields). Combine with filter[...] keys to narrow further. |
 | `filter[status]` | query | string: `sent` \| `partially_paid` \| `paid` \| `overpaid` |  | Restricts results to records matching the given status. |
 | `filter[isOverdue]` | query | string: `true` \| `false` |  | Restricts results to records matching the given isOverdue. |
-| `filter[type]` | query | string: `rent` \| `ancillary_expense` \| `final_account` \| `manual` \| `budget` |  | Restricts results to records matching the given type. |
+| `filter[type]` | query | string: `rent` \| `ancillary_expense` \| `final_account` \| `manual` \| `budget` \| `opening` |  | Restricts results to records matching the given type. |
 | `filter[personId]` | query | integer |  | Restricts results to records belonging to the given person id. |
 | `filter[contractId]` | query | integer |  | Restricts results to records belonging to the given contract id. |
 | `filter[objectId]` | query | integer |  | Restricts results to records belonging to the given object id. |
@@ -43,7 +43,7 @@ Use `q` to search by invoice number or label.
 **List capabilities**
 
 - **Searchable (`q`):** reference, label
-- **Filterable:** `filter[status]` (`sent`, `partially_paid`, `paid`, `overpaid`), `filter[isOverdue]` (`true`, `false`), `filter[type]` (`rent`, `ancillary_expense`, `final_account`, `manual`, `budget`), `filter[personId]`, `filter[contractId]`, `filter[objectId]`, `filter[propertyId]`, `filter[mandateId]`, `filter[dueDateFrom]`, `filter[dueDateTo]`
+- **Filterable:** `filter[status]` (`sent`, `partially_paid`, `paid`, `overpaid`), `filter[isOverdue]` (`true`, `false`), `filter[type]` (`rent`, `ancillary_expense`, `final_account`, `manual`, `budget`, `opening`), `filter[personId]`, `filter[contractId]`, `filter[objectId]`, `filter[propertyId]`, `filter[mandateId]`, `filter[dueDateFrom]`, `filter[dueDateTo]`
 - **Sortable:** `id`, `invoiceDate`, `dueDate` (prefix `-` for descending)
 - **Page size:** default `30`, maximum `100`
 
@@ -203,9 +203,9 @@ belong to the selected `{mode}`.
 
 ### DebitorInvoiceType
 
-String enum, 5 values.
+String enum, 6 values.
 
-`rent`, `ancillary_expense`, `final_account`, `manual`, `budget`
+`rent`, `ancillary_expense`, `final_account`, `manual`, `budget`, `opening`
 
 ### DebitorInvoiceStatus
 
@@ -267,9 +267,9 @@ String enum, 4 values.
 
 ### InvoicePositionType
 
-String enum, 14 values.
+String enum, 15 values.
 
-`normal`, `vat`, `rent_net`, `rent_ancillary_expenses_actual`, `rent_ancillary_expenses_flat`, `ae_floating_reduction`, `ae_costs`, `administration_fee`, `rounding`, `budget_cost_share`, `budget_revenue_share`, `budget_fund_deposit`, `budget_previous_balance`, `budget_advance_charge`
+`normal`, `vat`, `rent_net`, `rent_ancillary_expenses_actual`, `rent_ancillary_expenses_flat`, `ae_floating_reduction`, `ae_costs`, `administration_fee`, `rounding`, `budget_cost_share`, `budget_revenue_share`, `budget_fund_deposit`, `budget_previous_balance`, `budget_advance_charge`, `final_account`
 
 ### DebitorInvoicePaymentResponse
 

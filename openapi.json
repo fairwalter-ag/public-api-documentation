@@ -719,6 +719,7 @@
                                 "ancillary_expense",
                                 "vacancy",
                                 "reimbursement_invoice",
+                                "opening_takeover",
                                 "manual",
                                 "closing_entry"
                             ]
@@ -1807,7 +1808,8 @@
                                 "ancillary_expense",
                                 "final_account",
                                 "manual",
-                                "budget"
+                                "budget",
+                                "opening"
                             ]
                         }
                     },
@@ -6484,6 +6486,7 @@
                     "ancillary_expense",
                     "vacancy",
                     "reimbursement_invoice",
+                    "opening_takeover",
                     "manual",
                     "closing_entry"
                 ]
@@ -7257,7 +7260,8 @@
                     "budget_revenue_share",
                     "budget_fund_deposit",
                     "budget_previous_balance",
-                    "budget_advance_charge"
+                    "budget_advance_charge",
+                    "final_account"
                 ]
             },
             "DebitorInvoicePositionResponse": {
@@ -7310,7 +7314,8 @@
                     "ancillary_expense",
                     "final_account",
                     "manual",
-                    "budget"
+                    "budget",
+                    "opening"
                 ]
             },
             "DebitorInvoiceStatus": {
